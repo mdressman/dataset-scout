@@ -567,6 +567,73 @@ def test_curate_classifies_rate_limit_failure(tmp_path: Path):
     assert "max-concurrency" in result.failures[0]["hint"]
 
 
+def test_curate_skips_component_when_label_column_is_list_typed(tmp_path: Path):
+    """Regression: HarmBench-style datasets expose `positive`/`negative` as
+    list<string> columns of completion examples, not scalar labels. The
+    strategy assessor used to infer `label_column=positive` from the column
+    name; curate would then silently drop every row. We now skip the
+    component with a clear `label_column_type_mismatch` failure so the
+    recipe gets surfaced and fixed instead of producing 0 rows.
+    """
+    good_rows = _two_class_rows(n=10)
+    # Mirror the actual HarmBench shape: `positive` holds list<string>
+    # of example completions, not a per-row binary label.
+    harmbench_rows: list[dict[str, object]] = [
+        {
+            "id": i,
+            "Behavior": f"behaviour prompt {i}",
+            "ContextString": "",
+            "positive": [f"Q: example completion {i}.a", f"Q: example completion {i}.b"],
+            "negative": [f"benign continuation {i}.a"],
+        }
+        for i in range(8)
+    ]
+    fake = _multi_fake({"org/good": good_rows, "org/harmbench": harmbench_rows})
+
+    bad_component = RecipeComponent(
+        id="fake_org_harmbench",
+        source="fake",
+        source_id="org/harmbench",
+        revision="r1",
+        source_split="train",
+        strategy=StrategyKind.DIRECT_USE,
+        strategy_confidence=0.9,
+        transform=RecipeTransform(
+            text_column="Behavior",
+            label_column="positive",
+            label_value_map={"positive": "positive", "negative": "benign"},
+            label_kind_map={},
+            filter=None,
+            take="all",
+        ),
+    )
+    recipe = _make_recipe(components=[_component_for("org/good"), bad_component])
+
+    result = run_curate(recipe, tmp_path / "corpus", ctx=_ctx(), sources_override=[fake])
+
+    # The good component still produces a corpus.
+    assert result.total_rows == 10
+    assert result.components_kept == 1
+    assert result.components_failed == 1
+
+    failure = result.failures[0]
+    assert failure["id"] == "fake_org_harmbench"
+    assert failure["category"] == "label_column_type_mismatch"
+    assert failure["exception_type"] == "LabelColumnTypeMismatch"
+    # Message must cite the offending column, the observed type, and a
+    # sample value so the user can fix the recipe without re-running.
+    assert "'positive'" in failure["message"]
+    assert "list" in failure["message"]
+    assert "example completion" in failure["message"]
+    assert "label_column" in failure["hint"]
+
+    # Report.md must surface the skip with the same category + hint so
+    # users see it without spelunking through the lockfile.
+    report = (tmp_path / "corpus" / "report.md").read_text(encoding="utf-8")
+    assert "fake_org_harmbench" in report
+    assert "label_column_type_mismatch" in report
+
+
 # ─── M5: parallel materialisation determinism ───────────────────────
 
 
