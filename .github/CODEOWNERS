@@ -1,0 +1,14 @@
+# Default owner for everything in the repo.
+# A CODEOWNERS entry is what makes "Require review from Code Owners"
+# in a branch ruleset actually do something useful.
+*       @mdressman
+
+# CI / release / governance — bias towards extra eyes.
+/.github/                       @mdressman
+/.github/workflows/             @mdressman
+/pyproject.toml                 @mdressman
+/uv.lock                        @mdressman
+
+# Core pipeline contracts. Touch these and a review is non-optional.
+/src/dataset_scout/             @mdressman
+/docs/                          @mdressman

@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest an improvement, new source plugin, or workflow.
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Briefs, recon output, curate quality — describe the friction first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How would this look from the user's perspective? CLI flag? New source plugin? Doc change?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - brief / decomposer
+        - recon / discovery
+        - paper search (S2 / arXiv)
+        - strategy assessor
+        - curate
+        - inspect / judge / eval
+        - new Source plugin
+        - docs
+        - CI / release / tooling
+    validations:
+      required: true
+  - type: checkboxes
+    id: limits
+    attributes:
+      label: Honest-limits check
+      options:
+        - label: I've read the README "Honest limits" section and this isn't already documented as a known gap.

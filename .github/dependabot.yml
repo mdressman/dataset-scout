@@ -10,3 +10,23 @@ updates:
     labels:
       - dependencies
       - github-actions
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Python dependencies declared in pyproject.toml. uv.lock is the
+  # source of truth at install time; Dependabot opens PRs against
+  # pyproject and CI re-resolves via `uv sync --dev`.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+      - python
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
