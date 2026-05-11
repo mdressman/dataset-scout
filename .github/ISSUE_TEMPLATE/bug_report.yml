@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in dataset-scout broke or behaved wrong.
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report. Per `CONTRIBUTING.md`,
+        the most useful bug reports include the brief you ran, the
+        command, and the relevant stderr or `report.md` lines.
+  - type: textarea
+    id: brief
+    attributes:
+      label: Brief you ran
+      description: Redact as needed. <250 chars per repo conventions.
+      placeholder: "Find datasets useful for detecting prompt injection in user-agent strings."
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      render: shell
+      placeholder: "uv run datascout recon \"...\" --out datascout-out/repro"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected vs. what happened
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Stderr lines or excerpts from `report.md` / pipeline logs.
+      render: shell
+  - type: input
+    id: versions
+    attributes:
+      label: Python / uv / dataset-scout versions
+      placeholder: "python 3.12.3, uv 0.4.x, dataset-scout 0.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other / multiple
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Sanity checks
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: This isn't a security issue (those go via private advisory).
+          required: true
