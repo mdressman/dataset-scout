@@ -27,6 +27,7 @@ from dataset_scout.core import (
     PaperReference,
     ReconResult,
     Scorecard,
+    Strategy,
     SubScore,
 )
 from dataset_scout.errors import LLMError
@@ -438,6 +439,8 @@ def run_recon(
     # ─── Strategy assessment + coverage (M2b) ──
     semantic_gaps: list[CoverageGap] = []
     if use_llm and scorecards:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         from dataset_scout.shortlist import select_top_for_assessor
         from dataset_scout.strategy import assess_strategies
 
@@ -454,27 +457,38 @@ def run_recon(
             stage="assess",
             message=f"assessing {len(shortlist)} candidate(s)",
         )
-        for sc in shortlist:
+
+        def _assess_one(sc: Scorecard) -> tuple[Scorecard, list[Strategy] | str]:
             try:
-                sc.strategies = assess_strategies(
+                strategies = assess_strategies(
                     sc.candidate,
                     intent,
                     ctx=ctx,
                     source=source_index.get(sc.candidate.source),
                     cache=cache,
                 )
+                return sc, strategies
             except LLMError as exc:
-                notices.append(
-                    f"strategy assessment skipped for {sc.candidate.source}:"
-                    f"{sc.candidate.id}: {exc}"
+                return sc, str(exc)
+
+        workers = min(5, len(shortlist))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_assess_one, sc): sc for sc in shortlist}
+            for fut in as_completed(futures):
+                sc, result = fut.result()
+                if isinstance(result, str):
+                    notices.append(
+                        f"strategy assessment skipped for {sc.candidate.source}:"
+                        f"{sc.candidate.id}: {result}"
+                    )
+                    continue
+                sc.strategies = result
+                _emit(
+                    ProgressEventKind.STRATEGY_ASSESSED,
+                    stage="assess",
+                    id=sc.candidate.id,
+                    strategies=[s.kind.value for s in sc.strategies],
                 )
-                continue
-            _emit(
-                ProgressEventKind.STRATEGY_ASSESSED,
-                stage="assess",
-                id=sc.candidate.id,
-                strategies=[s.kind.value for s in sc.strategies],
-            )
         _emit(ProgressEventKind.STAGE_FINISHED, stage="assess")
 
     # Coverage gap synthesis runs whenever the LLM is available and we

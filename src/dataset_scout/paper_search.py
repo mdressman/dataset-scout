@@ -96,6 +96,11 @@ _DEFAULT_YEAR_WINDOW = 4
 # Per-direction keyword cap, mirroring the HF / Kaggle plugins.
 _KEYWORDS_PER_DIRECTION = 3
 
+# Cap on total named-benchmark queries that fire arXiv alongside S2.
+# Each arXiv query costs 3s (rate gate) + up to 8s (timeout) = 11s worst case.
+# Capping at 5 keeps worst-case arXiv time under 55s.
+_MAX_ARXIV_NAMED_QUERIES = 5
+
 _DEFAULT_TIMEOUT = 15.0
 
 
@@ -465,8 +470,12 @@ def _enumerate_queries(
     name like INTIMA or AnthroBench). These queries also fire arXiv
     in addition to S2: preprint indexing matters most for named
     benchmarks where S2 may lag arXiv by days or weeks.
+
+    Named-benchmark queries are capped at `_MAX_ARXIV_NAMED_QUERIES`
+    to bound arXiv time (each costs 3s rate gate + timeout).
     """
     out: list[tuple[list[str], str, bool]] = []
+    named_count = 0
     intent_q = _build_intent_query(intent)
     if intent_q:
         out.append(([], intent_q, False))
@@ -476,6 +485,10 @@ def _enumerate_queries(
             if not q:
                 continue
             is_named = q.strip().lower() in recalled_set
+            if is_named and named_count >= _MAX_ARXIV_NAMED_QUERIES:
+                is_named = False
+            if is_named:
+                named_count += 1
             out.append(([d.name], q, is_named))
     return out
 

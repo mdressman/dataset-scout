@@ -58,7 +58,7 @@ _ATOM_NS = "http://www.w3.org/2005/Atom"
 _NS = {"atom": _ATOM_NS}
 
 _DEFAULT_LIMIT = 20
-_DEFAULT_TIMEOUT = 15.0
+_DEFAULT_TIMEOUT = 8.0
 
 # arXiv's API guidance: "no more than one request every 3 seconds".
 # We enforce a global gate (module-level lock) so concurrent recons
