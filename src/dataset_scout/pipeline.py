@@ -472,8 +472,8 @@ def run_recon(
                 return sc, str(exc)
 
         workers = min(5, len(shortlist))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_assess_one, sc): sc for sc in shortlist}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_assess_one, sc): sc for sc in shortlist}
             for fut in as_completed(futures):
                 sc, result = fut.result()
                 if isinstance(result, str):

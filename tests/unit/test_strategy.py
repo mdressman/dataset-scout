@@ -507,8 +507,8 @@ def test_render_with_rows_snapshot_stable() -> None:
 
 def test_verify_columns_true_when_columns_match() -> None:
     """columns_verified is True when sample rows contain the referenced columns."""
-    from dataset_scout.strategy import _verify_columns
     from dataset_scout.core import TransformSpec
+    from dataset_scout.strategy import _verify_columns
 
     transform = TransformSpec(text_column="text", label_column="label")
     rows = [{"text": "hello", "label": "pos", "extra": 1}]
@@ -517,8 +517,8 @@ def test_verify_columns_true_when_columns_match() -> None:
 
 def test_verify_columns_false_when_text_column_missing() -> None:
     """columns_verified is False when text_column doesn't exist in sample rows."""
-    from dataset_scout.strategy import _verify_columns
     from dataset_scout.core import TransformSpec
+    from dataset_scout.strategy import _verify_columns
 
     transform = TransformSpec(text_column="nonexistent", label_column="label")
     rows = [{"text": "hello", "label": "pos"}]
@@ -527,8 +527,8 @@ def test_verify_columns_false_when_text_column_missing() -> None:
 
 def test_verify_columns_false_when_label_column_missing() -> None:
     """columns_verified is False when label_column doesn't exist in sample rows."""
-    from dataset_scout.strategy import _verify_columns
     from dataset_scout.core import TransformSpec
+    from dataset_scout.strategy import _verify_columns
 
     transform = TransformSpec(text_column="text", label_column="nonexistent")
     rows = [{"text": "hello", "label": "pos"}]
@@ -537,8 +537,8 @@ def test_verify_columns_false_when_label_column_missing() -> None:
 
 def test_verify_columns_none_when_no_sample_rows() -> None:
     """columns_verified is None when no sample rows are available."""
-    from dataset_scout.strategy import _verify_columns
     from dataset_scout.core import TransformSpec
+    from dataset_scout.strategy import _verify_columns
 
     transform = TransformSpec(text_column="text", label_column="label")
     assert _verify_columns(transform, None) is None
