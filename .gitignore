@@ -37,3 +37,6 @@ scratch/
 
 .commit_msg
 
+# Clarity protocol ephemeral state
+.clarity-protocol/mailboxes/*/_config.json
+.clarity-protocol/archive/
