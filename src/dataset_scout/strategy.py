@@ -312,7 +312,30 @@ def _parse_response(content: str) -> AssessorResponse:
     return AssessorResponse.model_validate(payload)
 
 
-def _to_strategy(entry: _StrategyEntry) -> Strategy:
+def _verify_columns(
+    transform: TransformSpec,
+    sample_rows: list[dict[str, Any]] | None,
+) -> bool | None:
+    """Check whether transform column names exist in the sample rows.
+
+    Returns True if all referenced columns were found, False if any were
+    missing, or None if verification was not possible (no sample rows).
+    """
+    if not sample_rows:
+        return None
+    available = set(sample_rows[0].keys())
+    for col in (transform.text_column, transform.label_column):
+        if col is not None and col not in available:
+            return False
+    return True
+
+
+def _to_strategy(
+    entry: _StrategyEntry,
+    sample_rows: list[dict[str, Any]] | None = None,
+) -> Strategy:
+    """Convert a parsed strategy entry to a Strategy with column verification."""
+    verified = _verify_columns(entry.transform, sample_rows)
     return Strategy(
         kind=entry.kind,
         confidence=entry.confidence,
@@ -320,6 +343,7 @@ def _to_strategy(entry: _StrategyEntry) -> Strategy:
         caveats=list(entry.caveats),
         transform=entry.transform,
         composes_with=[],
+        columns_verified=verified,
     )
 
 
@@ -395,6 +419,8 @@ def assess_strategies(
 
     Returns strategies sorted by confidence descending. Capped at 4.
     """
+    sample_rows_for_verify: list[dict[str, Any]] | None = None
+
     if not ctx.aoai_configured:
         raise LLMError(
             "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT "
@@ -403,6 +429,7 @@ def assess_strategies(
         )
 
     sample_rows, sample_note = _fetch_sample_rows(source, candidate, sample_n)
+    sample_rows_for_verify = sample_rows
     prompt = render_assessor_prompt(
         candidate,
         intent,
@@ -463,11 +490,15 @@ def assess_strategies(
     if cache is not None and cache_key is not None:
         cache.set_json("strategy", cache_key, parsed.model_dump(mode="json"))
 
-    return _finalise_strategies(parsed, candidate)
+    return _finalise_strategies(parsed, candidate, sample_rows=sample_rows_for_verify)
 
 
-def _finalise_strategies(parsed: AssessorResponse, candidate: Candidate) -> list[Strategy]:
-    """Drop composition_only, sort by confidence desc, cap at _MAX_STRATEGIES."""
+def _finalise_strategies(
+    parsed: AssessorResponse,
+    candidate: Candidate,
+    sample_rows: list[dict[str, Any]] | None = None,
+) -> list[Strategy]:
+    """Drop composition_only, verify columns, sort by confidence desc, cap at _MAX_STRATEGIES."""
     kept: list[_StrategyEntry] = []
     for entry in parsed.strategies:
         if entry.kind is StrategyKind.COMPOSITION_ONLY:
@@ -481,4 +512,13 @@ def _finalise_strategies(parsed: AssessorResponse, candidate: Candidate) -> list
         kept.append(entry)
 
     kept.sort(key=lambda e: e.confidence, reverse=True)
-    return [_to_strategy(e) for e in kept[:_MAX_STRATEGIES]]
+    strategies = [_to_strategy(e, sample_rows=sample_rows) for e in kept[:_MAX_STRATEGIES]]
+    unverified = [s for s in strategies if s.columns_verified is False]
+    if unverified:
+        _log.warning(
+            "candidate %s/%s: %d strategy(ies) reference columns not found in sample rows",
+            candidate.source,
+            candidate.id,
+            len(unverified),
+        )
+    return strategies

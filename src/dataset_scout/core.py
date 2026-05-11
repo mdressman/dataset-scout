@@ -289,6 +289,7 @@ class Strategy(BaseModel):
     caveats: list[str] = Field(default_factory=list)
     transform: TransformSpec
     composes_with: list[str] = Field(default_factory=list)
+    columns_verified: bool | None = None
 
 
 # ─── Scorecard ───────────────────────────────────────────────────────

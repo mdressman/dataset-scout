@@ -730,3 +730,73 @@ def test_curate_max_rows_per_component_does_not_raise_recipe_cap(tmp_path: Path)
 
     # Recipe says 120; override is 500; the lower wins.
     assert result.total_rows == 120
+
+
+# ─── FM1: schema validation at curate time ──────────────────────────
+
+
+def test_curate_classifies_schema_mismatch(tmp_path: Path):
+    """Component with wrong column names fails with schema_mismatch category."""
+    rows = _two_class_rows(n=10)
+    fake = _fake(rows)
+    component = _component(text_column="nonexistent_column")
+    recipe = _make_recipe(components=[_component(cid="good"), component])
+    # good component uses "text" which exists; bad uses "nonexistent_column"
+    result = run_curate(recipe, tmp_path / "corpus", ctx=_ctx(), sources_override=[fake])
+    assert result.components_failed == 1
+    assert result.failures[0]["category"] == "schema_mismatch"
+    assert "nonexistent_column" in result.failures[0]["message"]
+
+
+def test_curate_schema_mismatch_label_column(tmp_path: Path):
+    """Component with wrong label column fails with schema_mismatch category."""
+    rows = _two_class_rows(n=10)
+    fake = _fake(rows)
+    component = _component(cid="bad_label", label_column="fake_label")
+    recipe = _make_recipe(components=[_component(cid="good"), component])
+    result = run_curate(recipe, tmp_path / "corpus", ctx=_ctx(), sources_override=[fake])
+    assert result.components_failed == 1
+    assert result.failures[0]["category"] == "schema_mismatch"
+
+
+# ─── FM5: label distribution warnings ───────────────────────────────
+
+
+def test_curate_lockfile_has_label_distribution_warnings(tmp_path: Path):
+    """Lockfile includes label_distribution_warnings field."""
+    rows = _two_class_rows(n=20)
+    fake = _fake(rows)
+    recipe = _make_recipe(components=[_component()])
+    run_curate(recipe, tmp_path, ctx=_ctx(), sources_override=[fake])
+    lock = yaml.safe_load((tmp_path / "recipe.lock.yaml").read_text(encoding="utf-8"))
+    assert "label_distribution_warnings" in lock
+    assert isinstance(lock["label_distribution_warnings"], list)
+
+
+def test_curate_lockfile_has_dedup_impact(tmp_path: Path):
+    """Lockfile includes dedup_impact section."""
+    rows = _two_class_rows(n=20)
+    fake = _fake(rows)
+    recipe = _make_recipe(components=[_component()])
+    run_curate(recipe, tmp_path, ctx=_ctx(), sources_override=[fake])
+    lock = yaml.safe_load((tmp_path / "recipe.lock.yaml").read_text(encoding="utf-8"))
+    assert "dedup_impact" in lock
+    assert "rows_total_before_split" in lock["dedup_impact"]
+    assert "rows_in_dup_clusters" in lock["dedup_impact"]
+
+
+def test_curate_warns_on_all_proxy_corpus(tmp_path: Path):
+    """Warning emitted when majority of rows are proxy-labeled."""
+    rows = _two_class_rows(n=20)
+    fake = _fake(rows)
+    component = _component(
+        strategy=StrategyKind.SIGNAL_PROXY,
+        label_kind_map={"1": "proxy", "0": "proxy"},
+    )
+    recipe = _make_recipe(components=[component])
+    run_curate(recipe, tmp_path, ctx=_ctx(), sources_override=[fake])
+    lock = yaml.safe_load((tmp_path / "recipe.lock.yaml").read_text(encoding="utf-8"))
+    warnings = lock["label_distribution_warnings"]
+    assert any("proxy" in w.lower() for w in warnings)
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "label distribution warnings" in report.lower()

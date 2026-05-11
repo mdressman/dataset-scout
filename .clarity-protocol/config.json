@@ -1,0 +1,49 @@
+{
+  "documentState": {
+    "goal/problem.md": {
+      "contentHash": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879",
+      "dependencyHashes": {}
+    },
+    "goal/stakeholders.md": {
+      "contentHash": "eea3ed1b74cf8362d437a25e4c695007b4d3114e129ea354776ef0a0de7027d5",
+      "dependencyHashes": {
+        "goal/problem.md": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879"
+      }
+    },
+    "goal/requirements.md": {
+      "contentHash": "cdc21183e39c18e7101c2cf572e088bbf5bcfe6c9c27b4969d0490164bac139d",
+      "dependencyHashes": {
+        "goal/problem.md": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879",
+        "goal/stakeholders.md": "eea3ed1b74cf8362d437a25e4c695007b4d3114e129ea354776ef0a0de7027d5"
+      }
+    },
+    "summary.md": {
+      "contentHash": "6eb8b72dfe4a9afd3f93eaf43a9456c731f40ff96c44ab811c1e8ea0f2f796cb",
+      "dependencyHashes": {
+        "goal/problem.md": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879",
+        "goal/stakeholders.md": "eea3ed1b74cf8362d437a25e4c695007b4d3114e129ea354776ef0a0de7027d5",
+        "solution/solution.md": "69e18a317643622c8e453971a8f43bb7052616e0001c1e07c042dbfbcaa30308"
+      }
+    },
+    "goal/open-questions.md": {
+      "contentHash": "b2456f8da75c92ba36a1c7ed98cf63b99d042d1f5e626b46259693ec256c8b2b",
+      "dependencyHashes": {
+        "goal/problem.md": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879"
+      }
+    },
+    "solution/solution.md": {
+      "contentHash": "69e18a317643622c8e453971a8f43bb7052616e0001c1e07c042dbfbcaa30308",
+      "dependencyHashes": {
+        "goal/problem.md": "6617b21f4f6bdb27cb0ba827b6942eab6490db69d30411e5eb0f36f6eb18b879",
+        "goal/requirements.md": "cdc21183e39c18e7101c2cf572e088bbf5bcfe6c9c27b4969d0490164bac139d",
+        "goal/open-questions.md": "b2456f8da75c92ba36a1c7ed98cf63b99d042d1f5e626b46259693ec256c8b2b"
+      }
+    },
+    "failures/failures.md": {
+      "contentHash": "18c79d8e882f8640f4c074f958da9f69931eb03ecf510b5a34584251ca41e95e",
+      "dependencyHashes": {
+        "solution/solution.md": "69e18a317643622c8e453971a8f43bb7052616e0001c1e07c042dbfbcaa30308"
+      }
+    }
+  }
+}

@@ -501,3 +501,85 @@ def test_render_with_rows_snapshot_stable() -> None:
         "Row-aware assessor prompt drifted from snapshot. If intentional, "
         f"delete {_SNAPSHOT_WITH_ROWS_PATH} and re-run the test."
     )
+
+# ─── column verification (FM1 mitigation) ───────────────────────────
+
+
+def test_verify_columns_true_when_columns_match() -> None:
+    """columns_verified is True when sample rows contain the referenced columns."""
+    from dataset_scout.strategy import _verify_columns
+    from dataset_scout.core import TransformSpec
+
+    transform = TransformSpec(text_column="text", label_column="label")
+    rows = [{"text": "hello", "label": "pos", "extra": 1}]
+    assert _verify_columns(transform, rows) is True
+
+
+def test_verify_columns_false_when_text_column_missing() -> None:
+    """columns_verified is False when text_column doesn't exist in sample rows."""
+    from dataset_scout.strategy import _verify_columns
+    from dataset_scout.core import TransformSpec
+
+    transform = TransformSpec(text_column="nonexistent", label_column="label")
+    rows = [{"text": "hello", "label": "pos"}]
+    assert _verify_columns(transform, rows) is False
+
+
+def test_verify_columns_false_when_label_column_missing() -> None:
+    """columns_verified is False when label_column doesn't exist in sample rows."""
+    from dataset_scout.strategy import _verify_columns
+    from dataset_scout.core import TransformSpec
+
+    transform = TransformSpec(text_column="text", label_column="nonexistent")
+    rows = [{"text": "hello", "label": "pos"}]
+    assert _verify_columns(transform, rows) is False
+
+
+def test_verify_columns_none_when_no_sample_rows() -> None:
+    """columns_verified is None when no sample rows are available."""
+    from dataset_scout.strategy import _verify_columns
+    from dataset_scout.core import TransformSpec
+
+    transform = TransformSpec(text_column="text", label_column="label")
+    assert _verify_columns(transform, None) is None
+    assert _verify_columns(transform, []) is None
+
+
+def test_assess_sets_columns_verified_true_with_matching_rows(
+    monkeypatch: pytest.MonkeyPatch, fake_token_provider: None
+) -> None:
+    """columns_verified is True when LLM references columns that exist in sample rows."""
+    from tests._fakes.fake_source import FakeSource
+
+    cand = _candidate()
+    rows = [{"text": "hello", "label": 1}]
+    src = FakeSource(candidates=[cand], samples={cand.id: rows})
+
+    def fake_completion(**kwargs: Any) -> _Resp:
+        return _resp({"strategies": [_entry("direct_use", 0.8)]})
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    result = assess_strategies(cand, _intent(), ctx=_ctx(), source=src, sample_n=1)
+    assert result[0].columns_verified is True
+
+
+def test_assess_sets_columns_verified_false_with_hallucinated_columns(
+    monkeypatch: pytest.MonkeyPatch, fake_token_provider: None
+) -> None:
+    """columns_verified is False when LLM references columns not in sample rows."""
+    from tests._fakes.fake_source import FakeSource
+
+    cand = _candidate()
+    rows = [{"prompt": "hello", "category": 1}]
+    src = FakeSource(candidates=[cand], samples={cand.id: rows})
+
+    entry = _entry("direct_use", 0.8)
+    entry["transform"]["text_column"] = "text"
+    entry["transform"]["label_column"] = "label"
+
+    def fake_completion(**kwargs: Any) -> _Resp:
+        return _resp({"strategies": [entry]})
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    result = assess_strategies(cand, _intent(), ctx=_ctx(), source=src, sample_n=1)
+    assert result[0].columns_verified is False

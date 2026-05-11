@@ -351,6 +351,12 @@ def _classify_component_failure(c: RecipeComponent, exc: BaseException) -> dict[
             "Hit upstream rate limits. Set HF_TOKEN for higher quotas, "
             "or lower --max-concurrency on curate."
         )
+    elif "references columns not found" in lower:
+        category = "schema_mismatch"
+        hint = (
+            "The recipe's text_column or label_column doesn't match the actual "
+            "dataset schema. Edit the recipe to use real column names."
+        )
     else:
         category = "unknown"
         hint = "See the message; if it recurs, file an issue with the trace."
@@ -367,6 +373,23 @@ def _classify_component_failure(c: RecipeComponent, exc: BaseException) -> dict[
         "message": short_msg,
         "hint": hint,
     }
+
+
+def _validate_component_schema(
+    component: RecipeComponent,
+    first_row: dict[str, Any],
+) -> list[str]:
+    """Check transform column names against actual row schema.
+
+    Returns a list of missing column names. Empty list means all columns verified.
+    """
+    available = set(first_row.keys())
+    missing: list[str] = []
+    if component.transform.text_column and component.transform.text_column not in available:
+        missing.append(component.transform.text_column)
+    if component.transform.label_column and component.transform.label_column not in available:
+        missing.append(component.transform.label_column)
+    return missing
 
 
 def _materialize_component(
@@ -404,7 +427,17 @@ def _materialize_component(
         split=component.source_split,
         take=take_int,
     )
+    schema_checked = False
     for i, row in enumerate(rows):
+        if not schema_checked:
+            missing = _validate_component_schema(component, row)
+            if missing:
+                raise DatasetScoutError(
+                    f"Component {component.id!r} references columns not found in "
+                    f"the dataset: {missing}. Available columns: {sorted(row.keys())}. "
+                    f"Edit the recipe to fix text_column / label_column."
+                )
+            schema_checked = True
         if filter_fn is not None:
             try:
                 if not filter_fn(row):
@@ -623,6 +656,7 @@ def _write_lockfile(
     started_iso: str,
     elapsed_s: float,
 ) -> None:
+    label_warnings = _label_distribution_warnings(splits)
     payload = {
         "recipe_version": recipe.recipe_version,
         "curate_version": CURATE_VERSION,
@@ -682,6 +716,16 @@ def _write_lockfile(
             for c in dropped
         ],
         "failed_components": list(failures),
+        "label_distribution_warnings": label_warnings,
+        "dedup_impact": {
+            "rows_total_before_split": sum(len(rows) for rows in splits.values()),
+            "rows_in_dup_clusters": dedup_stats.get("rows_in_dup_clusters", 0),
+            "clusters_total": dedup_stats.get("clusters_total", 0),
+            "clusters_non_singleton": (
+                dedup_stats.get("clusters_total", 0)
+                - dedup_stats.get("clusters_singleton", 0)
+            ),
+        },
         "fingerprint": fingerprint,
         "started_at": started_iso,
         "elapsed_seconds": round(elapsed_s, 3),
@@ -803,6 +847,33 @@ def _write_report(
         for f in failures:
             lines.append(f"- `{f['id']}` — **{f['category']}** · {f['hint']}")
 
+    label_warnings = _label_distribution_warnings(splits)
+    if label_warnings:
+        lines += [
+            "",
+            "## ⚠️ Label distribution warnings",
+            "",
+        ]
+        for w in label_warnings:
+            lines.append(f"- {w}")
+
+    dup_rows = dedup_stats.get("rows_in_dup_clusters", 0)
+    dup_clusters_non_singleton = (
+        dedup_stats.get("clusters_total", 0) - dedup_stats.get("clusters_singleton", 0)
+    )
+    if dup_rows > 0:
+        lines += [
+            "",
+            "## Dedup impact",
+            "",
+            f"- **{dup_rows:,}** rows fell into **{dup_clusters_non_singleton:,}** "
+            f"near-duplicate clusters (kept together in the same split to prevent leakage)",
+        ]
+        total_rows = sum(len(v) for v in splits.values())
+        if total_rows > 0:
+            pct = dup_rows / total_rows * 100
+            lines.append(f"- Near-duplicate rate: **{pct:.1f}%** of total rows")
+
     lines += [
         "",
         "---",
@@ -830,6 +901,51 @@ def _aggregate_label_counts(
             out[rec.label] += 1
             out[rec.label_kind.value] += 1
     return out
+
+
+def _label_distribution_warnings(
+    splits: dict[str, list[NormalizedRecord]],
+) -> list[str]:
+    """Generate warnings for skewed or suspicious label distributions."""
+    warnings: list[str] = []
+    label_counts = _aggregate_label_counts(splits)
+    total = sum(label_counts.get(lbl, 0) for lbl in ("positive", "benign", "hard_negative"))
+    if total == 0:
+        return warnings
+
+    proxy_count = label_counts.get("proxy", 0)
+    ground_truth_count = label_counts.get("ground_truth", 0)
+    kind_total = proxy_count + ground_truth_count + label_counts.get("remapped", 0) + label_counts.get("subset_extracted", 0)
+
+    if kind_total > 0 and proxy_count / kind_total > 0.5:
+        warnings.append(
+            f"Over half the rows ({proxy_count}/{kind_total}) have label_kind=proxy. "
+            f"Exclude proxies from evaluation splits."
+        )
+
+    if kind_total > 0 and ground_truth_count == 0:
+        warnings.append(
+            "No ground_truth rows in the corpus. All labels are derived "
+            "(proxy, remapped, or subset_extracted)."
+        )
+
+    positive_count = label_counts.get("positive", 0)
+    benign_count = label_counts.get("benign", 0)
+    if total > 0 and positive_count == 0:
+        warnings.append("No positive-labeled rows in the corpus.")
+    if total > 0 and benign_count == 0:
+        warnings.append("No benign-labeled rows in the corpus.")
+
+    if total > 10:
+        minority = min(positive_count, benign_count)
+        majority = max(positive_count, benign_count)
+        if majority > 0 and minority / majority < 0.05:
+            warnings.append(
+                f"Severe class imbalance: {minority} vs {majority} "
+                f"(positive vs benign). Consider rebalancing."
+            )
+
+    return warnings
 
 
 def _aggregate_licenses(realized: dict[str, dict[str, Any]]) -> str:
