@@ -1,20 +1,19 @@
-"""LLM-driven per-candidate strategy assessment (Azure OpenAI + Entra).
+"""LLM-driven per-candidate strategy assessment.
 
-Given a `Candidate` and the user's `Intent`, ask the configured Azure
-OpenAI deployment for 1-4 ranked strategies for using the candidate
-(direct use, subset extraction, label remapping, cross-class
-repurposing, signal proxy, benign baseline, or "not useful"). The
-pipeline calls this once per shortlisted candidate; failures fall back
-to skipping assessment for that candidate (the pipeline catches the
-`LLMError`).
+Given a `Candidate` and the user's `Intent`, ask the configured LLM
+provider for 1-4 ranked strategies for using the candidate (direct
+use, subset extraction, label remapping, cross-class repurposing,
+signal proxy, benign baseline, or "not useful"). The pipeline calls
+this once per shortlisted candidate; failures fall back to skipping
+assessment for that candidate (the pipeline catches the `LLMError`).
 
 Composition pairing (`composes_with`) is a portfolio-level decision
 made elsewhere; the prompt explicitly forbids `composition_only` here
 and any such strategy that slips through is dropped with a logged
 warning.
 
-Network-free at import time. AOAI plumbing (litellm, azure-identity)
-lives in `dataset_scout.llm_client` and is imported lazily.
+Network-free at import time. Provider routing (litellm + per-provider
+auth) lives in `dataset_scout.llm_client` and is imported lazily.
 """
 
 from __future__ import annotations
@@ -28,7 +27,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataset_scout.core import Candidate, Intent, Strategy, StrategyKind, TransformSpec
 from dataset_scout.errors import LLMError
-from dataset_scout.llm_client import build_completion_kwargs, extract_content, import_litellm
+from dataset_scout.llm_client import (
+    build_completion_kwargs,
+    effective_model_id,
+    extract_content,
+    import_litellm,
+)
 
 if TYPE_CHECKING:
     from dataset_scout.cache import Cache
@@ -36,8 +40,10 @@ if TYPE_CHECKING:
     from dataset_scout.sources.base import Source
 
 # Bumped when prompt or response handling changes in a way that would
-# invalidate cached assessments.
-ASSESSOR_VERSION = "2"
+# invalidate cached assessments. v3 introduces effective-model-id
+# keying (was ctx.aoai_deployment) so cross-provider runs don't
+# pollute each other.
+ASSESSOR_VERSION = "3"
 
 # Column names commonly used for the supervision label. Used to summarise
 # distinct values in the SAMPLE ROWS section so the LLM can fill in
@@ -395,12 +401,13 @@ def assess_strategies(
     sample_n: int = 8,
     cache: Cache | None = None,
 ) -> list[Strategy]:
-    """Ask the AOAI deployment for 1-4 ranked strategies for a candidate.
+    """Ask the configured LLM provider for 1-4 ranked strategies for a candidate.
 
     Single completion call; one retry on Pydantic validation failure
-    using the same prompt. Any other failure (network, missing AOAI
-    config, no Entra creds, repeated validation failure) raises
-    `LLMError` so the pipeline can skip assessment for this candidate.
+    using the same prompt. Any other failure (network, no LLM
+    configured, missing credentials, repeated validation failure)
+    raises ``LLMError`` so the pipeline can skip assessment for this
+    candidate.
 
     `composition_only` strategies are dropped with a logged warning —
     composition is decided at portfolio level, not per candidate.
@@ -421,11 +428,12 @@ def assess_strategies(
     """
     sample_rows_for_verify: list[dict[str, Any]] | None = None
 
-    if not ctx.aoai_configured:
+    if not ctx.llm_configured:
         raise LLMError(
-            "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT "
-            "and AZURE_OPENAI_DEPLOYMENT (and run `az login` for Entra "
-            "auth)."
+            "No LLM provider configured. Set DATASET_SCOUT_MODEL "
+            "(e.g. 'github_copilot/gpt-5-mini' or 'github/gpt-4o-mini'), "
+            "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT (and run "
+            "`az login` for Entra auth)."
         )
 
     sample_rows, sample_note = _fetch_sample_rows(source, candidate, sample_n)
@@ -439,10 +447,9 @@ def assess_strategies(
 
     cache_key: str | None = None
     if cache is not None:
+        resolved = effective_model_id(ctx) or ""
         cache_key = hashlib.sha256(
-            (ASSESSOR_VERSION + "\n" + (ctx.aoai_deployment or "") + "\n" + prompt).encode(
-                "utf-8"
-            )
+            (ASSESSOR_VERSION + "\n" + resolved + "\n" + prompt).encode("utf-8")
         ).hexdigest()
         cached = cache.get_json("strategy", cache_key)
         if cached is not None:

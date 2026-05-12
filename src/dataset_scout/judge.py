@@ -1,12 +1,14 @@
 """LLM-as-judge label rescue.
 
 Promotes per-row labels from "unknown / weakly inferred" to "judged with
-stated confidence" by calling an Azure OpenAI chat deployment per row,
+stated confidence" by calling the configured LLM provider per row,
 parsing a strict JSON verdict into a :class:`JudgeBlock`, and applying
 an explicit-gap promotion rule: only ``positive`` / ``negative`` verdicts
 at-or-above the configured threshold rewrite the row's label.
 
-The CLI verb is a thin wrapper over :func:`run_judge`.
+Provider-agnostic via ``llm_client``: routes through whichever provider
+``ctx.model`` (or the legacy AOAI fields) configures. The CLI verb is
+a thin wrapper over :func:`run_judge`.
 
 Network-free at import time. Heavy imports (``litellm``, ``azure-identity``)
 are deferred into the chat-client call site so unit tests never pay for
@@ -32,15 +34,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataset_scout.core import JudgeBlock, LabelKind, NormalizedRecord
 from dataset_scout.errors import DatasetScoutError, LLMError
-from dataset_scout.llm_client import build_completion_kwargs, extract_content, import_litellm
+from dataset_scout.llm_client import (
+    build_completion_kwargs,
+    effective_model_id,
+    extract_content,
+    import_litellm,
+)
 
 if TYPE_CHECKING:
     from dataset_scout.context import ScoutContext
 
 # Bumped only when scout's prompt template (or response post-processing)
 # changes in a way that would invalidate cached verdicts. Scout-internal;
-# never coordinated with any other tool.
-JUDGE_TEMPLATE_VERSION = "1"
+# never coordinated with any other tool. v2 introduces effective-model-id
+# keying via _resolve_model_name (was azure-openai/<deployment>) so
+# cross-provider runs don't pollute each other.
+JUDGE_TEMPLATE_VERSION = "2"
 
 # Per-batch checkpoint cadence (rows per checkpoint flush). The figure
 # is a tradeoff between resumability granularity and IO churn.
@@ -149,10 +158,13 @@ class _ChatClient:
 
 
 class ContentFilterError(LLMError):
-    """Raised when AOAI rejected a row via its content-safety filter.
+    """Raised when the provider's content-safety filter rejected the row.
 
     Soft per-row failure; the run continues. Counted in
-    ``stats.n_content_filter_blocked``.
+    ``stats.n_content_filter_blocked``. Currently only Azure OpenAI's
+    policy filter and the Copilot proxy raise this shape, but any
+    provider returning a recognisable content-filter response will
+    surface here.
     """
 
 
@@ -162,14 +174,24 @@ class JudgeParseError(LLMError):
 
 @dataclass
 class _LiteLLMChatClient(_ChatClient):
-    """Default ``_ChatClient`` that routes through ``litellm`` to AOAI.
+    """Default ``_ChatClient`` that routes through ``litellm``.
 
     Re-uses the shared ``llm_client.build_completion_kwargs`` helper so
-    auth + routing are identical to decompose / strategy.
+    provider routing is identical to decompose / strategy / coverage —
+    Azure OpenAI when ``ctx.model`` is unset, GitHub Copilot / GitHub
+    Models / OpenAI / Anthropic when ``ctx.model`` is set with the
+    appropriate prefix.
+
+    ``model_override`` carries the per-call ``run_judge(model=...)``
+    flag through to the actual completion call. Without it the cache
+    key + audit trail (built via ``_resolve_model_name``) would record
+    one model while the call ran under another — silent provider
+    mismatch.
     """
 
     ctx: ScoutContext
     token_provider: Any | None = None
+    model_override: str | None = None
 
     def call(self, *, messages: list[dict[str, str]], timeout_s: float) -> str:
         litellm = import_litellm()
@@ -179,6 +201,7 @@ class _LiteLLMChatClient(_ChatClient):
             response_format=BaseModel,  # triggers json_object mode
             timeout_s=timeout_s,
             token_provider=self.token_provider,
+            model=self.model_override,
         )
         kwargs["max_tokens"] = _MAX_TOKENS
         try:
@@ -669,23 +692,34 @@ def _judge_one_record(
     return block, derived
 
 
-def _resolve_chat_client(ctx: ScoutContext, chat_client: _ChatClient | None) -> _ChatClient:
+def _resolve_chat_client(
+    ctx: ScoutContext,
+    chat_client: _ChatClient | None,
+    *,
+    model: str | None = None,
+) -> _ChatClient:
     if chat_client is not None:
         return chat_client
-    if not ctx.aoai_configured:
+    if not ctx.llm_configured and not model:
         raise LLMError(
-            "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT "
-            "and AZURE_OPENAI_DEPLOYMENT (and run `az login` for Entra "
-            "auth)."
+            "No LLM provider configured. Set DATASET_SCOUT_MODEL "
+            "(e.g. 'github_copilot/gpt-5-mini' or 'github/gpt-4o-mini'), "
+            "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT (and run "
+            "`az login` for Entra auth)."
         )
-    return _LiteLLMChatClient(ctx=ctx)
+    return _LiteLLMChatClient(ctx=ctx, model_override=model)
 
 
 def _resolve_model_name(ctx: ScoutContext, override: str | None) -> str:
+    """Stable model identifier for cache keys + audit trail.
+
+    Reflects the actual provider/model the call goes to. Cache keys
+    embed this so a backend switch (Azure ↔ GitHub Copilot) can't
+    serve stale verdicts.
+    """
     if override:
         return override
-    deployment = ctx.aoai_deployment or "unconfigured"
-    return f"azure-openai/{deployment}"
+    return effective_model_id(ctx) or "unconfigured"
 
 
 def _eligible_for_judging(rec: NormalizedRecord, *, only_unknown: bool) -> bool:
@@ -1097,7 +1131,7 @@ def run_judge(
     files_written: list[Path] = []
 
     only_unknown_eff = only_unknown and not re_judge_all
-    chat = None if dry_run else _resolve_chat_client(ctx, chat_client)
+    chat = None if dry_run else _resolve_chat_client(ctx, chat_client, model=model)
 
     calibration_block: dict[str, Any] | None = None
     if calibrate_against is not None and not dry_run:

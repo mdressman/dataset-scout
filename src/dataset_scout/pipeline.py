@@ -48,22 +48,27 @@ _DEFAULT_MAX_CANDIDATES = 100
 # Single source of truth for the metadata-only-mode notice. Used by both
 # the stderr emitter and the report header so wording stays in sync.
 METADATA_ONLY_NOTICE = (
-    "Running in metadata-only mode: Azure OpenAI is not configured, so "
+    "Running in metadata-only mode: no LLM provider is configured, so "
     "decomposition, strategy assessment, and coverage gaps were skipped. "
-    "To enable them, copy .env.example to .env, set AZURE_OPENAI_ENDPOINT "
-    "and AZURE_OPENAI_DEPLOYMENT, and run `az login`."
+    "To enable them, copy .env.example to .env and set DATASET_SCOUT_MODEL "
+    "(e.g. 'github_copilot/gpt-5-mini' or 'github/gpt-4o-mini'), or set "
+    "AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT (and run `az login` "
+    "for Entra auth)."
 )
 
 
-# Companion hint shown when AOAI IS configured but a call failed at
-# runtime — the deployment is wrong, the token couldn't be acquired,
-# the network is unreachable, etc. The specific error is already in
-# the notice list above this; this just orients the user.
+# Companion hint shown when the LLM IS configured but a call failed at
+# runtime — the model name is wrong, the token couldn't be acquired, the
+# network is unreachable, etc. The specific error is already in the
+# notice list above this; this just orients the user.
 LLM_RUNTIME_HINT = (
-    "Azure OpenAI was configured but the call failed (see error above). "
-    "Common causes: AZURE_OPENAI_DEPLOYMENT name doesn't exist on the "
-    "endpoint, expired Entra token (`az login` again), network issue, "
-    "or quota exhausted. Pipeline continued in metadata-only mode."
+    "The LLM provider was configured but the call failed (see error "
+    "above). Common causes: wrong model id (DATASET_SCOUT_MODEL or "
+    "AZURE_OPENAI_DEPLOYMENT), expired credential (`az login` for Azure "
+    "Entra; re-authorize the device-code flow for github_copilot/), "
+    "missing API key (GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY), "
+    "network issue, or quota exhausted. Pipeline continued in metadata-"
+    "only mode."
 )
 
 
@@ -216,14 +221,14 @@ def run_recon(
                 keywords=list(d.keywords),
                 source="reused-from-file",
             )
-        # Strategy assessment / coverage still need AOAI; if it's not
+        # Strategy assessment / coverage still need an LLM; if none is
         # configured we degrade quietly and search-only.
         from dataset_scout.decompose import llm_available
 
         if not llm_available(ctx):
             use_llm = False
             notices.append(
-                "Reused decomposition.yaml; Azure OpenAI is not configured "
+                "Reused decomposition.yaml; no LLM provider is configured "
                 "so strategy assessment and coverage gaps are skipped."
             )
     elif use_llm:
@@ -255,8 +260,8 @@ def run_recon(
                 message=f"proposed {len(directions)} direction(s)",
             )
 
-    # Only emit the "AOAI not configured" notice when AOAI genuinely
-    # isn't configured AND the user didn't supply pre-computed directions
+    # Only emit the metadata-only notice when no LLM is genuinely
+    # configured AND the user didn't supply pre-computed directions
     # (in which case we already emitted a more specific notice above).
     if not use_llm and not llm_runtime_error and directions_override is None:
         notices.append(METADATA_ONLY_NOTICE)
@@ -410,11 +415,19 @@ def run_recon(
         )
 
     # ─── Embedding label-intent fit (between probes and shortlist) ─
-    # Populates Scorecard.label_intent_fit when AOAI embeddings are
-    # configured; no-op otherwise. Runs before the shortlist so future
-    # rankers can incorporate the signal — today it's surfaced as a
-    # report annotation.
-    if scorecards and use_llm:
+    # Populates Scorecard.label_intent_fit when an embedding backend is
+    # available (sbert by default; AOAI when DATASET_SCOUT_EMBEDDING_BACKEND=
+    # aoai and the deployment is configured). No-op otherwise. Runs
+    # before the shortlist so future rankers can incorporate the
+    # signal — today it's surfaced as a report annotation.
+    #
+    # NOTE: Intentionally not gated on `use_llm` — the default backend
+    # is local sentence-transformers and needs no LLM provider. Users
+    # in metadata-only mode (no LLM configured, or LLM call failed)
+    # still benefit from the embedding-fit signal. `assess_label_intent_fit`
+    # itself no-ops cleanly when no embedder is available, so this
+    # branch is safe even when sentence-transformers isn't installed.
+    if scorecards:
         from dataset_scout.embedding_fit import assess_label_intent_fit
 
         _emit(ProgressEventKind.STAGE_STARTED, stage="embedding_fit")
@@ -501,7 +514,9 @@ def run_recon(
 
         _emit(ProgressEventKind.STAGE_STARTED, stage="coverage")
         try:
-            semantic_gaps = build_coverage_report(intent, directions, scorecards, ctx=ctx)
+            semantic_gaps = build_coverage_report(
+                intent, directions, scorecards, ctx=ctx, cache=cache
+            )
         except LLMError as exc:
             notices.append(f"coverage report skipped: {exc}")
             semantic_gaps = []

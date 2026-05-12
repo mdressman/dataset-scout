@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,11 +56,20 @@ class ScoutContext(BaseModel):
     Construct via `ScoutContext.from_env()` for normal use, or build one
     directly in tests / API callers.
 
-    Azure OpenAI + Entra is the LLM auth model: callers configure the
-    AOAI endpoint and deployment via env vars (or directly), and the
-    bearer token is acquired lazily via `DefaultAzureCredential` (which
-    chains `az login`, managed identity, env-var service-principal,
-    etc.). No API keys are stored in `ScoutContext` for the LLM path.
+    LLM auth supports two postures:
+
+    1. **Azure OpenAI + Entra** (legacy default): set `aoai_endpoint`
+       and `aoai_deployment`; bearer tokens come from
+       `DefaultAzureCredential`. No API key stored.
+    2. **Universal model id** (recommended for non-Azure backends):
+       set `model` to a litellm-style id like `github_copilot/gpt-5-mini`,
+       `github/gpt-4o-mini`, `openai/gpt-4o-mini`, or
+       `anthropic/claude-sonnet-4-5`. litellm handles the per-provider
+       auth flow (e.g. OAuth device-code for `github_copilot/`,
+       `GITHUB_TOKEN` env var for `github/`).
+
+    When both are set, `model` wins. When neither is set, LLM stages
+    degrade to no-ops (metadata-only mode) per `llm_configured`.
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True, extra="forbid")
@@ -77,17 +86,39 @@ class ScoutContext(BaseModel):
         }
     )
 
-    # Source-specific tokens (HF, Kaggle). LLM auth is Entra, not API
-    # keys, and lives in the AOAI fields below.
+    # Source-specific tokens (HF, Kaggle). LLM auth is provider-specific
+    # and lives in `model` (universal) or the AOAI fields (legacy).
     api_keys: Mapping[str, str] = Field(default_factory=dict)
 
-    # ─── Azure OpenAI ────────────────────────────────────────────
+    # ─── Universal LLM model id ──────────────────────────────────
+    # litellm-style: "github_copilot/gpt-5-mini", "github/gpt-4o-mini",
+    # "openai/gpt-4o-mini", "anthropic/claude-sonnet-4-5", or
+    # "azure/<deployment>". When None, falls back to synthesized
+    # "azure/<aoai_deployment>" if AOAI is configured.
+    model: str | None = None
+
+    # ─── Azure OpenAI (legacy / Entra-auth path) ─────────────────
     aoai_endpoint: str | None = None
     aoai_deployment: str | None = None
     aoai_api_version: str = "2024-10-21"
     # Optional: an embeddings deployment name (e.g. text-embedding-3-small).
     # When unset, the embedding-fit pipeline stage no-ops gracefully.
     aoai_embedding_deployment: str | None = None
+
+    # ─── Embeddings (label_intent_fit stage) ─────────────────────
+    # "sbert"  → local CPU sentence-transformers (default; needs the
+    #            `dataset-scout[local-embeddings]` extra installed).
+    # "aoai"   → Azure OpenAI embeddings via aoai_embedding_deployment.
+    # "none"   → skip the embedding-fit stage entirely (still no-ops if
+    #            the chosen backend isn't actually available).
+    # The factory build_embedder() honors this AND returns None if the
+    # backend isn't actually available — so misconfiguration just
+    # degrades cleanly to skipping the stage.
+    embedding_backend: Literal["aoai", "sbert", "none"] = "sbert"
+    # Override the model name for the chosen backend. For sbert this is
+    # an HF repo id; for aoai it falls back to aoai_embedding_deployment
+    # when None.
+    embedding_model: str | None = None
 
     is_tty: bool = False
 
@@ -106,6 +137,20 @@ class ScoutContext(BaseModel):
             DATASET_SCOUT_OUT_DIR
             HUGGINGFACE_HUB_TOKEN / HF_TOKEN
             KAGGLE_USERNAME / KAGGLE_KEY
+
+            DATASET_SCOUT_MODEL         — universal litellm-style model id,
+                                          e.g. "github_copilot/gpt-5-mini",
+                                          "github/gpt-4o-mini", "openai/gpt-4o".
+                                          Wins over the AOAI fields when set.
+
+            DATASET_SCOUT_EMBEDDING_BACKEND  — "sbert" (default), "aoai",
+                                          or "none".
+            DATASET_SCOUT_EMBEDDING_MODEL    — override the model name
+                                          for the chosen embedding
+                                          backend. For sbert: an HF
+                                          repo id (default
+                                          "sentence-transformers/all-
+                                          MiniLM-L6-v2").
 
             AZURE_OPENAI_ENDPOINT       — e.g. https://my-aoai.openai.azure.com/
             AZURE_OPENAI_DEPLOYMENT     — deployment name (e.g. gpt-4o-mini)
@@ -129,6 +174,14 @@ class ScoutContext(BaseModel):
             kwargs["config_dir"] = Path(v)
         if v := e.get("DATASET_SCOUT_OUT_DIR"):
             kwargs["out_dir"] = Path(v)
+        if v := e.get("DATASET_SCOUT_MODEL"):
+            kwargs["model"] = v
+        if v := e.get("DATASET_SCOUT_EMBEDDING_BACKEND"):
+            normalized = v.strip().lower()
+            if normalized in {"sbert", "aoai", "none"}:
+                kwargs["embedding_backend"] = normalized
+        if v := e.get("DATASET_SCOUT_EMBEDDING_MODEL"):
+            kwargs["embedding_model"] = v
         if v := e.get("AZURE_OPENAI_ENDPOINT"):
             kwargs["aoai_endpoint"] = v.rstrip("/")
         if v := e.get("AZURE_OPENAI_DEPLOYMENT"):
@@ -148,10 +201,27 @@ class ScoutContext(BaseModel):
 
     @property
     def aoai_configured(self) -> bool:
-        """True iff endpoint + deployment are present.
+        """True iff Azure-specific endpoint + deployment are present.
 
         Bearer-token availability (e.g., `az login` having been run) is
         checked lazily by the LLM call site — it requires a network
         round-trip we don't want to pay here.
+
+        This property only reflects the legacy Azure path. For "is *any*
+        LLM provider configured?", use `llm_configured` instead.
         """
         return bool(self.aoai_endpoint) and bool(self.aoai_deployment)
+
+    @property
+    def llm_configured(self) -> bool:
+        """True iff *some* LLM provider is configured.
+
+        True when either:
+          - `model` is set (any litellm-supported provider), or
+          - the legacy Azure fields are set.
+
+        Provider-specific credential availability (Entra token, GitHub
+        device code, GITHUB_TOKEN, OPENAI_API_KEY) is checked lazily at
+        call time — this is a no-network probe.
+        """
+        return bool(self.model) or self.aoai_configured

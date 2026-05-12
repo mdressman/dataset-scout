@@ -714,17 +714,19 @@ def _write_header(buf: StringIO, ctx: ReconReportContext) -> None:
     if ctx.metadata_only:
         buf.write(
             '<div class="callout callout--warn"><strong>⚠️ Metadata-only mode.</strong>'
-            "Azure OpenAI is not configured, so decomposition, strategy assessment, "
+            "No LLM provider is configured, so decomposition, strategy assessment, "
             "and coverage gaps were skipped. To enable them, copy <code>.env.example</code> "
-            "to <code>.env</code>, set <code>AZURE_OPENAI_ENDPOINT</code> and "
-            "<code>AZURE_OPENAI_DEPLOYMENT</code>, and run <code>az login</code>."
+            "to <code>.env</code> and set <code>DATASET_SCOUT_MODEL</code> "
+            "(e.g. <code>github_copilot/gpt-5-mini</code> or <code>github/gpt-4o-mini</code>), "
+            "or set <code>AZURE_OPENAI_ENDPOINT</code> and "
+            "<code>AZURE_OPENAI_DEPLOYMENT</code> and run <code>az login</code>."
             "</div>\n"
         )
     elif ctx.llm_runtime_error:
         buf.write(
             '<div class="callout callout--warn"><strong>⚠️ LLM call failed — running in metadata-only mode.</strong>'
-            "Azure OpenAI was configured but a call failed at runtime "
-            "(deployment name, token, network, or quota — see notices below). "
+            "The LLM provider was configured but a call failed at runtime "
+            "(model id, credential, network, or quota — see notices below). "
             "Decomposition, strategy assessment, and coverage gaps were skipped."
             "</div>\n"
         )

@@ -1,8 +1,8 @@
 """`datascout inspect` — single-candidate deep-dive (M3).
 
 Pulls a candidate's metadata + a small streamed sample from its source,
-runs the cheap probes, optionally assesses strategies via the LLM
-when AOAI is configured, and returns a typed `InspectResult` the CLI
+runs the cheap probes, optionally assesses strategies via the
+configured LLM provider, and returns a typed `InspectResult` the CLI
 renders to stdout.
 
 Usage shapes:
@@ -281,7 +281,7 @@ def run_inspect(
     if text_col is not None:
         length_stats = _length_stats(sample_rows, text_col)
 
-    # Strategy assessment (optional — needs intent + AOAI).
+    # Strategy assessment (optional — needs intent + an LLM provider).
     strategies = _maybe_assess_strategies(candidate, intent, ctx, notices)
 
     return InspectResult(
@@ -384,11 +384,11 @@ def _maybe_assess_strategies(
 ) -> list[Strategy]:
     if intent is None:
         return []
-    if not ctx.aoai_configured:
+    if not ctx.llm_configured:
         notices.append(
-            "Strategy assessment skipped: Azure OpenAI not configured "
-            "(set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT, "
-            "and run `az login`)."
+            "Strategy assessment skipped: no LLM provider configured "
+            "(set DATASET_SCOUT_MODEL, e.g. 'github_copilot/gpt-5-mini', "
+            "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT)."
         )
         return []
     from dataset_scout.strategy import assess_strategies

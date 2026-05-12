@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -22,10 +21,9 @@ from dataset_scout.embedding_fit import (
     _compose_intent_text,
     _cosine,
     _embedding_cache_key,
-    _extract_embedding,
     assess_label_intent_fit,
 )
-from dataset_scout.errors import SourceUnsupportedError
+from dataset_scout.errors import LLMError, SourceUnsupportedError
 
 pytestmark = pytest.mark.unit
 
@@ -114,6 +112,46 @@ class _FakeEmbeddingResponse:
         self.data = [{"embedding": vector}]
 
 
+class _FakeEmbedder:
+    """Test double for the Embedder protocol.
+
+    Records every call to ``embed`` and returns canned vectors. Tests
+    inject this directly via ``embedder=`` to bypass the real backend
+    factory and avoid mocking litellm / torch internals.
+    """
+
+    name: str = "fake"
+
+    def __init__(
+        self,
+        vectors: list[list[float]] | None = None,
+        *,
+        model: str = "fake-model",
+        on_call: Any | None = None,
+    ) -> None:
+        self.model = model
+        self.calls: list[list[str]] = []
+        self._vectors = vectors or [[1.0, 0.0, 0.0]]
+        self._idx = 0
+        # Optional callback (call_count -> vector | raises) to vary
+        # behavior per call. When set, overrides ``vectors``.
+        self._on_call = on_call
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        out: list[list[float]] = []
+        for _ in texts:
+            if self._on_call is not None:
+                vec = self._on_call(len(self.calls))
+            elif self._idx < len(self._vectors):
+                vec = self._vectors[self._idx]
+                self._idx += 1
+            else:
+                vec = self._vectors[-1]
+            out.append(vec)
+        return out
+
+
 # ─── pure-function tests ────────────────────────────────────────────
 
 
@@ -179,60 +217,82 @@ def test_compose_candidate_text_caps_length():
 
 
 def test_extract_embedding_dict_shape():
+    from dataset_scout.embedder import _extract_embeddings
+
     response = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
-    assert _extract_embedding(response) == [0.1, 0.2, 0.3]
+    assert _extract_embeddings(response, expected=1) == [[0.1, 0.2, 0.3]]
 
 
 def test_extract_embedding_attr_shape():
+    from dataset_scout.embedder import _extract_embeddings
+
     response = _FakeEmbeddingResponse([0.4, 0.5])
-    assert _extract_embedding(response) == [0.4, 0.5]
+    assert _extract_embeddings(response, expected=1) == [[0.4, 0.5]]
 
 
 def test_extract_embedding_malformed():
-    assert _extract_embedding({}) is None
-    assert _extract_embedding({"data": []}) is None
-    assert _extract_embedding({"data": [{}]}) is None
+    from dataset_scout.embedder import _extract_embeddings
+
+    with pytest.raises(LLMError):
+        _extract_embeddings({}, expected=1)
+    with pytest.raises(LLMError):
+        _extract_embeddings({"data": []}, expected=1)
+    with pytest.raises(LLMError):
+        _extract_embeddings({"data": [{}]}, expected=1)
 
 
 def test_embedding_cache_key_stable():
-    a = _embedding_cache_key("hello world", "text-embedding-3-small")
-    b = _embedding_cache_key("hello world", "text-embedding-3-small")
+    a = _embedding_cache_key(
+        "hello world", embedder_name="aoai", embedder_model="text-embedding-3-small"
+    )
+    b = _embedding_cache_key(
+        "hello world", embedder_name="aoai", embedder_model="text-embedding-3-small"
+    )
     assert a == b
     assert len(a) == 64
 
 
-def test_embedding_cache_key_changes_with_text_or_deployment():
-    a = _embedding_cache_key("a", "dep1")
-    assert _embedding_cache_key("b", "dep1") != a
-    assert _embedding_cache_key("a", "dep2") != a
+def test_embedding_cache_key_changes_with_text_or_backend():
+    a = _embedding_cache_key("a", embedder_name="aoai", embedder_model="dep1")
+    assert _embedding_cache_key("b", embedder_name="aoai", embedder_model="dep1") != a
+    assert _embedding_cache_key("a", embedder_name="aoai", embedder_model="dep2") != a
+    # Same text+model but different backend → different key (sbert vs aoai
+    # produce different-dim vectors that must not collide).
+    assert _embedding_cache_key("a", embedder_name="sbert", embedder_model="dep1") != a
 
 
 # ─── pipeline-stage integration tests ───────────────────────────────
 
 
-def test_assess_noops_without_embedding_deployment():
-    """No embedding deployment → no calls, no scorecard mutation."""
+def test_assess_noops_when_no_embedder_available():
+    """Backend "none" → no calls, no scorecard mutation."""
     ctx = ScoutContext(
-        aoai_endpoint="https://x", aoai_deployment="gpt", aoai_embedding_deployment=None
+        aoai_endpoint="https://x",
+        aoai_deployment="gpt",
+        aoai_embedding_deployment=None,
+        embedding_backend="none",
     )
-    sc = Scorecard(candidate=_candidate())
-    with patch("dataset_scout.embedding_fit.import_litellm") as mock_imp:
-        n = assess_label_intent_fit([sc], _intent(), ctx=ctx)
-    assert n == 0
-    assert sc.label_intent_fit is None
-    assert not mock_imp.called
-
-
-def test_assess_noops_without_aoai_endpoint():
-    ctx = ScoutContext(aoai_endpoint=None, aoai_embedding_deployment="emb")
     sc = Scorecard(candidate=_candidate())
     n = assess_label_intent_fit([sc], _intent(), ctx=ctx)
     assert n == 0
     assert sc.label_intent_fit is None
 
 
-def test_assess_populates_subscore_with_mocked_embedding(tmp_path):
-    """Happy path: mocked litellm returns vectors, scorecard gets a SubScore."""
+def test_assess_noops_when_aoai_backend_chosen_without_endpoint():
+    """``embedding_backend=aoai`` with no AOAI deployment → no-op."""
+    ctx = ScoutContext(
+        aoai_endpoint=None,
+        aoai_embedding_deployment="emb",
+        embedding_backend="aoai",
+    )
+    sc = Scorecard(candidate=_candidate())
+    n = assess_label_intent_fit([sc], _intent(), ctx=ctx)
+    assert n == 0
+    assert sc.label_intent_fit is None
+
+
+def test_assess_populates_subscore_with_injected_embedder(tmp_path):
+    """Happy path: injected embedder returns vectors, scorecard gets a SubScore."""
     ctx = _ctx_with_embedding()
     sc = Scorecard(candidate=_candidate())
     src = _FakeSource(
@@ -241,31 +301,15 @@ def test_assess_populates_subscore_with_mocked_embedding(tmp_path):
     )
     cache = Cache(tmp_path / "cache.db")
 
-    fake_litellm = type(
-        "F",
-        (),
-        {
-            "embedding": staticmethod(
-                lambda **kw: _FakeEmbeddingResponse([1.0, 0.0, 0.0])
-            ),
-            "suppress_debug_info": True,
-        },
+    embedder = _FakeEmbedder(vectors=[[1.0, 0.0, 0.0]])
+    n = assess_label_intent_fit(
+        [sc],
+        _intent(),
+        ctx=ctx,
+        source_index={"huggingface": src},
+        cache=cache,
+        embedder=embedder,
     )
-    def fake_token() -> str:
-        return "fake-token"
-
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=fake_token
-    ):
-        n = assess_label_intent_fit(
-            [sc],
-            _intent(),
-            ctx=ctx,
-            source_index={"huggingface": src},
-            cache=cache,
-        )
     cache.close()
 
     assert n == 1
@@ -275,6 +319,7 @@ def test_assess_populates_subscore_with_mocked_embedding(tmp_path):
     assert sc.label_intent_fit.probe_version == EMBEDDING_FIT_VERSION
     assert sc.label_intent_fit.evidence
     assert "cosine=" in sc.label_intent_fit.evidence[0].detail
+    assert "fake/fake-model" in sc.label_intent_fit.evidence[0].detail
 
 
 def test_assess_uses_cache_on_second_call(tmp_path):
@@ -283,29 +328,20 @@ def test_assess_uses_cache_on_second_call(tmp_path):
     src = _FakeSource("huggingface", rows=[{"text": "x", "label": "y"}])
     cache = Cache(tmp_path / "cache.db")
 
-    call_count = {"n": 0}
-
-    def _embedding(**kwargs):
-        call_count["n"] += 1
-        return _FakeEmbeddingResponse([1.0, 0.0])
-
-    fake_litellm = type("F", (), {"embedding": staticmethod(_embedding)})
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=lambda: "t"
-    ):
-        assess_label_intent_fit(
-            [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache
-        )
-        first = call_count["n"]
-        # Reset scorecard, run again — every embedding (intent + 1 candidate)
-        # should come from cache.
-        sc.label_intent_fit = None
-        assess_label_intent_fit(
-            [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache
-        )
-        second = call_count["n"]
+    embedder = _FakeEmbedder(vectors=[[1.0, 0.0]])
+    assess_label_intent_fit(
+        [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache,
+        embedder=embedder,
+    )
+    first = len(embedder.calls)
+    # Reset scorecard, run again — every embedding (intent + 1 candidate)
+    # should come from cache.
+    sc.label_intent_fit = None
+    assess_label_intent_fit(
+        [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache,
+        embedder=embedder,
+    )
+    second = len(embedder.calls)
     cache.close()
     assert first == 2  # intent + candidate
     assert second == first  # second run hit cache for both
@@ -318,19 +354,11 @@ def test_assess_low_confidence_when_no_sample_rows(tmp_path):
     # Source returns no rows.
     src = _FakeSource("huggingface", rows=[])
     cache = Cache(tmp_path / "cache.db")
-    fake_litellm = type(
-        "F",
-        (),
-        {"embedding": staticmethod(lambda **kw: _FakeEmbeddingResponse([1.0, 0.0]))},
+    embedder = _FakeEmbedder(vectors=[[1.0, 0.0]])
+    assess_label_intent_fit(
+        [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache,
+        embedder=embedder,
     )
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=lambda: "t"
-    ):
-        assess_label_intent_fit(
-            [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache
-        )
     cache.close()
     assert sc.label_intent_fit is not None
     assert sc.label_intent_fit.status == "low_confidence"
@@ -343,19 +371,11 @@ def test_assess_handles_unsupported_source_gracefully(tmp_path):
     sc = Scorecard(candidate=cand)
     src = _FakeSource("kaggle", raise_unsupported=True)
     cache = Cache(tmp_path / "cache.db")
-    fake_litellm = type(
-        "F",
-        (),
-        {"embedding": staticmethod(lambda **kw: _FakeEmbeddingResponse([0.5, 0.5]))},
+    embedder = _FakeEmbedder(vectors=[[0.5, 0.5]])
+    n = assess_label_intent_fit(
+        [sc], _intent(), ctx=ctx, source_index={"kaggle": src}, cache=cache,
+        embedder=embedder,
     )
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=lambda: "t"
-    ):
-        n = assess_label_intent_fit(
-            [sc], _intent(), ctx=ctx, source_index={"kaggle": src}, cache=cache
-        )
     cache.close()
     # Stage still updated the scorecard (with low_confidence: no rows).
     assert n == 1
@@ -371,29 +391,22 @@ def test_assess_per_candidate_failure_isolated(tmp_path):
     src = _FakeSource("huggingface", rows=[{"text": "x", "label": "y"}])
     cache = Cache(tmp_path / "cache.db")
 
-    call_count = {"n": 0}
-
-    def _embedding(**kwargs):
-        call_count["n"] += 1
+    def _on_call(call_count: int) -> list[float]:
         # Intent embedding (call 1) and second candidate (call 3) succeed;
         # first candidate (call 2) fails.
-        if call_count["n"] == 2:
+        if call_count == 2:
             raise RuntimeError("simulated embedding failure")
-        return _FakeEmbeddingResponse([1.0, 0.0])
+        return [1.0, 0.0]
 
-    fake_litellm = type("F", (), {"embedding": staticmethod(_embedding)})
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=lambda: "t"
-    ):
-        assess_label_intent_fit(
-            [sc1, sc2],
-            _intent(),
-            ctx=ctx,
-            source_index={"huggingface": src},
-            cache=cache,
-        )
+    embedder = _FakeEmbedder(on_call=_on_call)
+    assess_label_intent_fit(
+        [sc1, sc2],
+        _intent(),
+        ctx=ctx,
+        source_index={"huggingface": src},
+        cache=cache,
+        embedder=embedder,
+    )
     cache.close()
     assert sc1.label_intent_fit is not None
     assert sc1.label_intent_fit.value is None
@@ -416,23 +429,16 @@ def test_score_clamped_to_nonnegative(tmp_path):
     cache = Cache(tmp_path / "cache.db")
 
     # Make intent and candidate embeddings opposite → cosine = -1.
-    call_count = {"n": 0}
+    def _on_call(call_count: int) -> list[float]:
+        if call_count == 1:
+            return [1.0, 0.0]
+        return [-1.0, 0.0]
 
-    def _embedding(**kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return _FakeEmbeddingResponse([1.0, 0.0])
-        return _FakeEmbeddingResponse([-1.0, 0.0])
-
-    fake_litellm = type("F", (), {"embedding": staticmethod(_embedding)})
-    with patch(
-        "dataset_scout.embedding_fit.import_litellm", return_value=fake_litellm
-    ), patch(
-        "dataset_scout.embedding_fit.make_token_provider", return_value=lambda: "t"
-    ):
-        assess_label_intent_fit(
-            [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache
-        )
+    embedder = _FakeEmbedder(on_call=_on_call)
+    assess_label_intent_fit(
+        [sc], _intent(), ctx=ctx, source_index={"huggingface": src}, cache=cache,
+        embedder=embedder,
+    )
     cache.close()
     assert sc.label_intent_fit is not None
     assert sc.label_intent_fit.value == 0.0

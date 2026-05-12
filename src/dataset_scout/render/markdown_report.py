@@ -59,16 +59,18 @@ def render_recon_report(result: ReconResult) -> str:
     if metadata_only:
         buf.write(
             "> ⚠️ **Metadata-only mode.**  \n"
-            "> Azure OpenAI is not configured, so decomposition, strategy\n"
+            "> No LLM provider is configured, so decomposition, strategy\n"
             "> assessment, and coverage gaps were skipped. To enable them,\n"
-            "> copy `.env.example` to `.env`, set `AZURE_OPENAI_ENDPOINT`\n"
-            "> and `AZURE_OPENAI_DEPLOYMENT`, and run `az login`.\n\n"
+            "> copy `.env.example` to `.env` and set `DATASET_SCOUT_MODEL`\n"
+            "> (e.g. `github_copilot/gpt-5-mini` or `github/gpt-4o-mini`),\n"
+            "> or set `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`\n"
+            "> and run `az login`.\n\n"
         )
     elif llm_runtime_error:
         buf.write(
             "> ⚠️ **LLM call failed — running in metadata-only mode.**  \n"
-            "> Azure OpenAI was configured but a call failed at runtime\n"
-            "> (deployment name, token, network, or quota — see notices\n"
+            "> The LLM provider was configured but a call failed at runtime\n"
+            "> (model id, credential, network, or quota — see notices\n"
             "> below). Decomposition, strategy assessment, and coverage\n"
             "> gaps were skipped.\n\n"
         )

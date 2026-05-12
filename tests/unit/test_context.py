@@ -68,6 +68,8 @@ def test_from_env_picks_up_aoai_config():
     assert ctx.aoai_deployment == "gpt-4o-mini"
     assert ctx.aoai_api_version == "2024-08-01-preview"
     assert ctx.aoai_configured is True
+    # Universal LLM signal also true via the AOAI back-compat path.
+    assert ctx.llm_configured is True
 
 
 def test_aoai_configured_requires_both_fields():
@@ -81,6 +83,44 @@ def test_aoai_configured_requires_both_fields():
         ).aoai_configured
         is True
     )
+
+
+# ─── universal model field + llm_configured ─────────────────────────
+
+
+def test_from_env_picks_up_universal_model():
+    ctx = ScoutContext.from_env(env={"DATASET_SCOUT_MODEL": "github_copilot/gpt-5-mini"})
+    assert ctx.model == "github_copilot/gpt-5-mini"
+    # LLM is configured via the universal path even though no AOAI
+    # endpoint / deployment exist.
+    assert ctx.llm_configured is True
+    # ...but the AOAI-specific check stays False.
+    assert ctx.aoai_configured is False
+
+
+def test_llm_configured_false_when_nothing_set():
+    assert ScoutContext().llm_configured is False
+
+
+def test_llm_configured_true_when_only_model_set():
+    """github_copilot / github / openai / anthropic users don't need
+    any AOAI config — setting ctx.model alone must satisfy the
+    'is some LLM provider configured?' check."""
+    assert ScoutContext(model="github_copilot/gpt-5-mini").llm_configured is True
+    assert ScoutContext(model="github/gpt-4o-mini").llm_configured is True
+    assert ScoutContext(model="openai/gpt-4o").llm_configured is True
+    assert ScoutContext(model="anthropic/claude-sonnet-4-5").llm_configured is True
+
+
+def test_llm_configured_true_via_aoai_back_compat():
+    """Existing users with only AZURE_OPENAI_* set must keep being
+    detected as configured — no breakage on upgrade."""
+    ctx = ScoutContext(
+        aoai_endpoint="https://x.openai.azure.com",
+        aoai_deployment="gpt-4o-mini",
+    )
+    assert ctx.llm_configured is True
+    assert ctx.model is None  # not set explicitly
 
 
 def test_context_is_frozen():

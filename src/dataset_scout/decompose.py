@@ -1,13 +1,16 @@
-"""LLM-driven brief decomposition (Azure OpenAI + Entra).
+"""LLM-driven brief decomposition.
 
-Given an `Intent`, ask the configured Azure OpenAI deployment for 3-7
-related search directions adjacent to the user's stated target. The
-pipeline uses this output to widen the search net before scoring;
-reframing (strategy assessment) lives separately in M2b.
+Given an `Intent`, ask the configured LLM provider for 3-7 related
+search directions adjacent to the user's stated target. The pipeline
+uses this output to widen the search net before scoring; reframing
+(strategy assessment) lives separately in M2b.
 
-Auth model: Azure Entra via `azure-identity`'s `DefaultAzureCredential`,
-which transparently chains `az login`, managed identity, and env-var
-service-principal flows. No API key needed for the LLM path.
+Auth model: provider-agnostic. The default path is Azure OpenAI +
+Entra (via `DefaultAzureCredential`), but any litellm-supported model
+id works — set ``ctx.model`` (env: ``DATASET_SCOUT_MODEL``) to e.g.
+``github_copilot/gpt-5-mini``, ``github/gpt-4o-mini``,
+``openai/gpt-4o``, etc. Provider auth is delegated to litellm
+(OAuth device-code flow for github_copilot, env vars for others).
 
 Network-free at import time. Heavy imports (`litellm`, `azure-identity`)
 are deferred into call sites so unit tests don't pay for them and the
@@ -18,26 +21,31 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataset_scout.core import DecompositionDirection, Intent
 from dataset_scout.errors import LLMError
+from dataset_scout.llm_client import (
+    build_completion_kwargs,
+    effective_model_id,
+    extract_content,
+    import_litellm,
+)
 
 if TYPE_CHECKING:
     from dataset_scout.cache import Cache
     from dataset_scout.context import ScoutContext
 
 # Bumped when prompt or response handling changes in a way that would
-# invalidate cached decomposition results.
-DECOMPOSE_VERSION = "3"
+# invalidate cached decomposition results. v4 introduced effective-
+# model-id keying (was ctx.aoai_deployment) to prevent cross-provider
+# cache pollution.
+DECOMPOSE_VERSION = "4"
 
 # Hard upper bound on directions returned (mirrors the prompt).
 _MAX_DIRECTIONS = 7
-
-# Entra token scope for Azure Cognitive Services (covers AOAI).
-_AOAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 
 
 class DecomposeResponse(BaseModel):
@@ -179,57 +187,26 @@ def render_decompose_prompt(intent: Intent) -> str:
 
 
 def llm_available(ctx: ScoutContext) -> bool:
-    """Cheap, no-network probe: is Azure OpenAI configured?
+    """Cheap, no-network probe: is *some* LLM provider configured?
 
-    Returns True when both the AOAI endpoint and deployment name are
-    present in `ctx`. Bearer-token availability (i.e., whether
-    `az login` has been run, or a managed identity is reachable) is
-    NOT checked here — that requires a network round-trip we don't
-    want to pay on every recon. If the token can't be acquired the
-    `decompose_intent` call will fail with `LLMError` and the pipeline
-    will fall back to metadata-only mode.
+    True when either ``ctx.model`` is set (any litellm provider —
+    ``github_copilot/...``, ``github/...``, ``openai/...``,
+    ``anthropic/...``, ``azure/...``) or the legacy AOAI endpoint +
+    deployment fields are set. Provider-specific credential
+    availability (``az login`` having been run, GITHUB_TOKEN exported,
+    GitHub Copilot device-code flow completed) is NOT checked here —
+    that requires a network round-trip we don't want to pay on every
+    recon. If the credential can't be acquired the `decompose_intent`
+    call will fail with `LLMError` and the pipeline will fall back to
+    metadata-only mode.
 
     Importantly, this function does NOT import `litellm` (~10s) or
-    `azure-identity`. Users without AOAI configured pay nothing.
+    `azure-identity`. Users without an LLM configured pay nothing.
     """
-    return ctx.aoai_configured
+    return ctx.llm_configured
 
 
 # ─── decomposition ──────────────────────────────────────────────────
-
-
-def _make_token_provider() -> Any:
-    """Build a fresh bearer-token provider via `DefaultAzureCredential`.
-
-    The credential chain checks: env-var service-principal,
-    workload-identity, managed identity, shared-token-cache, Azure CLI
-    (`az login`), and interactive browser — the standard local-dev →
-    prod progression. Tokens are cached internally; we don't add an
-    extra app-level cache.
-    """
-    try:
-        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-    except Exception as exc:
-        raise LLMError("azure-identity is required for AOAI Entra auth: " + str(exc)) from exc
-    return get_bearer_token_provider(DefaultAzureCredential(), _AOAI_SCOPE)
-
-
-def _extract_content(response: Any) -> str:
-    """Pull the JSON string from a litellm completion response.
-
-    OpenAI-style: `response.choices[0].message.content`. We avoid
-    importing litellm response types so the module stays light and
-    test mocks can be plain objects.
-    """
-    try:
-        choice = response.choices[0]
-        message = choice.message
-        content = message.content
-    except (AttributeError, IndexError, TypeError) as exc:
-        raise LLMError(f"unexpected LLM response shape: {exc}") from exc
-    if not isinstance(content, str):
-        raise LLMError("LLM response message.content was not a string")
-    return content
 
 
 def _parse_response(content: str) -> DecomposeResponse:
@@ -246,39 +223,48 @@ def decompose_intent(
     ctx: ScoutContext,
     timeout_s: float = 60.0,
     cache: Cache | None = None,
+    model: str | None = None,
 ) -> list[DecompositionDirection]:
-    """Ask the AOAI deployment for 3-7 related search directions.
+    """Ask the configured LLM provider for 3-7 related search directions.
 
     Single completion call; one retry on Pydantic validation failure
-    using the same prompt. Any other failure (network, missing AOAI
-    config, no Entra creds, repeated validation failure) raises
-    `LLMError` so the pipeline can fall back to metadata-only mode.
+    using the same prompt. Any other failure (network, missing provider
+    config, repeated validation failure) raises `LLMError` so the
+    pipeline can fall back to metadata-only mode.
 
     Result is clipped at 7 directions; an empty list is returned
     cleanly when the model honestly reports no useful adjacencies.
 
-    When `cache` is provided, identical (prompt, DECOMPOSE_VERSION)
-    inputs return without an LLM call. Cache hits skip the litellm
-    import entirely.
+    `model` overrides ``ctx.model`` (and the legacy AOAI synthesis) for
+    this call only — useful for the ``--model`` CLI flag. When None,
+    falls back to ``ctx.model`` then to ``azure/<aoai_deployment>``.
+
+    When `cache` is provided, identical (prompt, DECOMPOSE_VERSION,
+    effective-model-id) inputs return without an LLM call. Cache hits
+    skip the litellm import entirely. The cache key includes the
+    effective model id so switching backends (Azure ↔ GitHub Copilot)
+    does not serve stale cross-provider responses.
     """
-    if not ctx.aoai_configured:
+    resolved_model = effective_model_id(ctx, model)
+    if resolved_model is None:
         raise LLMError(
-            "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT "
-            "and AZURE_OPENAI_DEPLOYMENT (and run `az login` for Entra "
-            "auth)."
+            "No LLM provider configured. Set DATASET_SCOUT_MODEL "
+            "(e.g. 'github_copilot/gpt-5-mini' or 'github/gpt-4o-mini'), "
+            "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT (and run "
+            "`az login` for Entra auth)."
         )
 
     prompt = render_decompose_prompt(intent)
 
     # Cache check before any heavy import. Key on the rendered prompt
-    # plus the version sentinel — that captures intent + template +
-    # any future prompt edit boundary in one place.
+    # plus the version sentinel plus the resolved model id — that
+    # captures intent + template + provider/model in one place, and
+    # prevents stale Azure entries being served on a github_copilot/
+    # run (or vice versa).
     cache_key: str | None = None
     if cache is not None:
         cache_key = hashlib.sha256(
-            (DECOMPOSE_VERSION + "\n" + (ctx.aoai_deployment or "") + "\n" + prompt).encode(
-                "utf-8"
-            )
+            (DECOMPOSE_VERSION + "\n" + resolved_model + "\n" + prompt).encode("utf-8")
         ).hexdigest()
         cached = cache.get_json("decompose", cache_key)
         if cached is not None:
@@ -291,35 +277,16 @@ def decompose_intent(
             else:
                 return list(payload.directions[:_MAX_DIRECTIONS])
 
-    try:
-        import litellm
-    except Exception as exc:
-        raise LLMError(f"litellm not importable: {exc}") from exc
-
-    # Suppress litellm's chatty stderr decoration around exceptions.
-    if hasattr(litellm, "suppress_debug_info"):
-        litellm.suppress_debug_info = True
-
-    token_provider = _make_token_provider()
+    litellm = import_litellm()
 
     messages = [{"role": "user", "content": prompt}]
-
-    # litellm convention: prefix the deployment name with `azure/` so
-    # litellm knows to route via its Azure handler. The actual API call
-    # uses `api_base`, `api_version`, and `azure_ad_token_provider`.
-    completion_kwargs: dict[str, Any] = {
-        "model": f"azure/{ctx.aoai_deployment}",
-        "api_base": ctx.aoai_endpoint,
-        "api_version": ctx.aoai_api_version,
-        "azure_ad_token_provider": token_provider,
-        "messages": messages,
-        # json_object mode rather than passing DecomposeResponse as the
-        # response_format (Azure OpenAI's strict schema validator
-        # rejects some Pydantic-generated schemas; we already retry on
-        # post-parse Pydantic validation failure).
-        "response_format": {"type": "json_object"},
-        "timeout": timeout_s,
-    }
+    completion_kwargs = build_completion_kwargs(
+        ctx,
+        messages=messages,
+        response_format=DecomposeResponse,
+        timeout_s=timeout_s,
+        model=resolved_model,
+    )
 
     last_parse_error: Exception | None = None
     parsed: DecomposeResponse | None = None
@@ -327,14 +294,15 @@ def decompose_intent(
         try:
             response = litellm.completion(**completion_kwargs)
         except Exception as exc:
-            # Retry once on timeout-class errors (Azure OpenAI under load
-            # can take 30-60s for some prompts). Other errors fail fast.
+            # Retry once on timeout-class errors (some providers under
+            # load can take 30-60s for some prompts). Other errors fail
+            # fast.
             err_text = str(exc).lower()
             if attempt == 0 and ("timeout" in err_text or "timed out" in err_text):
                 continue
             raise LLMError(f"LLM call failed: {exc}") from exc
 
-        content = _extract_content(response)
+        content = extract_content(response)
         try:
             parsed = _parse_response(content)
             break

@@ -47,6 +47,13 @@ dependencies = [
 # can `pip install dataset-scout[langid]` once the probe lands).
 langid = ["fasttext>=0.9.2"]
 
+# Local CPU embeddings via sentence-transformers (default backend for
+# the embedding-fit pipeline stage when AOAI embeddings aren't
+# configured). Pulls torch (~1.5GB install). Without this extra, the
+# embedding-fit stage no-ops gracefully unless DATASET_SCOUT_EMBEDDING_
+# BACKEND=aoai is set.
+local-embeddings = ["sentence-transformers>=3.0"]
+
 # Dev / test tooling.
 dev = [
   "pytest>=9.1.1",

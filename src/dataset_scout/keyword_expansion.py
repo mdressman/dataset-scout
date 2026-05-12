@@ -21,6 +21,9 @@ Single LLM call, batched across all directions. Cached via the existing
 cache module's `decompose` namespace (the expansion is conceptually a
 continuation of the decomposition step). Failure is non-blocking -- if
 the call fails we keep the original `keywords` and continue.
+
+Provider-agnostic via `llm_client`: routes through whichever provider
+``ctx.model`` (or the legacy AOAI fields) configures.
 """
 
 from __future__ import annotations
@@ -33,15 +36,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataset_scout.core import DecompositionDirection, Intent
 from dataset_scout.errors import LLMError
-from dataset_scout.llm_client import build_completion_kwargs, extract_content, import_litellm
+from dataset_scout.llm_client import (
+    build_completion_kwargs,
+    effective_model_id,
+    extract_content,
+    import_litellm,
+)
 
 if TYPE_CHECKING:
     from dataset_scout.cache import Cache
     from dataset_scout.context import ScoutContext
 
 
-# Bumped when the prompt or response handling changes.
-EXPANSION_VERSION = "4"
+# Bumped when the prompt or response handling changes. v5 introduces
+# effective-model-id keying (was ctx.aoai_deployment) so cross-provider
+# runs don't pollute each other.
+EXPANSION_VERSION = "5"
 
 _MAX_KEYWORDS_PER_DIRECTION = 8
 _MAX_RECALLED_NAMES_PER_DIRECTION = 6
@@ -220,7 +230,7 @@ def expand_dataset_keywords(
     """
     if not directions:
         return []
-    if not ctx.aoai_configured:
+    if not ctx.llm_configured:
         # No LLM available; keep originals.
         return list(directions)
 
@@ -228,10 +238,9 @@ def expand_dataset_keywords(
 
     cache_key: str | None = None
     if cache is not None:
+        resolved = effective_model_id(ctx) or ""
         cache_key = hashlib.sha256(
-            (EXPANSION_VERSION + "\n" + (ctx.aoai_deployment or "") + "\n" + prompt).encode(
-                "utf-8"
-            )
+            (EXPANSION_VERSION + "\n" + resolved + "\n" + prompt).encode("utf-8")
         ).hexdigest()
         cached = cache.get_json("decompose", cache_key)
         if cached is not None:

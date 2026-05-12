@@ -1,4 +1,4 @@
-"""Unit tests for the LLM strategy assessor module (Azure OpenAI + Entra)."""
+"""Unit tests for the LLM strategy assessor module (provider-agnostic via llm_client)."""
 
 from __future__ import annotations
 
@@ -225,6 +225,31 @@ def test_assess_routes_via_azure_with_token_provider(
     assert "STRATEGIES" in msgs[0]["content"]
 
 
+def test_assess_routes_via_github_copilot_when_model_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same provider-agnostic dispatch as decompose: ctx.model='github_copilot/...'
+    bypasses Azure entirely. No api_base, no token provider."""
+    captured: dict[str, Any] = {}
+
+    def fake_completion(**kwargs: Any) -> _Resp:
+        captured.update(kwargs)
+        return _resp({"strategies": [_entry("direct_use", 0.9)]})
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    # Crucially, NO fake_token_provider fixture — the github_copilot
+    # branch must not call make_token_provider() at all.
+    ctx = ScoutContext(model="github_copilot/gpt-5-mini")
+    result = assess_strategies(_candidate(), _intent(), ctx=ctx)
+
+    assert len(result) == 1
+    assert captured["model"] == "github_copilot/gpt-5-mini"
+    assert "api_base" not in captured
+    assert "api_version" not in captured
+    assert "azure_ad_token_provider" not in captured
+    assert "api_key" not in captured
+
+
 def test_assess_sorts_by_confidence_descending(
     monkeypatch: pytest.MonkeyPatch, fake_token_provider: None
 ) -> None:
@@ -303,7 +328,7 @@ def test_assess_raises_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> Non
         return _resp({"strategies": []})
 
     monkeypatch.setattr("litellm.completion", fake_completion)
-    with pytest.raises(LLMError, match="Azure OpenAI is not configured"):
+    with pytest.raises(LLMError, match="No LLM provider configured"):
         assess_strategies(_candidate(), _intent(), ctx=ScoutContext())
     assert called["n"] == 0
 

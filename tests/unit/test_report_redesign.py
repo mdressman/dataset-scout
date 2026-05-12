@@ -272,8 +272,40 @@ def test_view_show_recipe_preview_false_when_metadata_only():
                 ),
             )
         ],
-        notices=["Azure OpenAI is not configured: ..."],
+        notices=["Running in metadata-only mode: no LLM provider is configured, ..."],
     )
     ctx = ReconReportContext.from_result(result)
     assert ctx.metadata_only is True
     assert ctx.show_recipe_preview is False
+
+
+# ─── regression: mode-detection sentinels track pipeline notice text ──
+
+
+def test_view_mode_detection_uses_canonical_pipeline_notice() -> None:
+    """ReconReportContext must detect metadata-only / runtime-error mode
+    from the *current* pipeline notice strings, not stale Azure-only text.
+
+    Pre-fix regression: ``_view.py`` substring-matched the historical
+    "Azure OpenAI is not configured" text. After the provider-agnostic
+    rewrite the pipeline emits "Running in metadata-only mode: ..." so
+    the detection silently broke and every recon report rendered with
+    ``metadata_only=False`` even when no LLM was configured.
+    """
+    from dataset_scout.pipeline import LLM_RUNTIME_HINT, METADATA_ONLY_NOTICE
+
+    md_result = ReconResult(
+        intent=Intent(raw_brief="x"),
+        candidates=[],
+        sources_searched=[],
+        notices=[METADATA_ONLY_NOTICE],
+    )
+    assert ReconReportContext.from_result(md_result).metadata_only is True
+
+    rt_result = ReconResult(
+        intent=Intent(raw_brief="x"),
+        candidates=[],
+        sources_searched=[],
+        notices=["decomposition skipped: oops", LLM_RUNTIME_HINT],
+    )
+    assert ReconReportContext.from_result(rt_result).llm_runtime_error is True

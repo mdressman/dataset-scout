@@ -578,7 +578,7 @@ def test_run_judge_writes_lockfile_and_report(tmp_path: Path) -> None:
     payload = _yaml.safe_load(lock_path.read_text(encoding="utf-8"))
     assert payload["judge"]["axis"] == "psych_harm"
     assert payload["judge"]["model"]
-    assert payload["judge"]["template_version"] == "1"
+    assert payload["judge"]["template_version"] == "2"
     assert payload["judge"]["n_judges"] == 1
     assert payload["judge"]["agreement"] == "single"
     assert payload["judge"]["threshold"] == 0.8
@@ -770,3 +770,54 @@ def test_curate_result_components_zero_row_default_and_set() -> None:
         components_zero_row=3,
     )
     assert r2.components_zero_row == 3
+
+
+# ─── regression: judge --model override actually flows to the call ──
+
+
+def test_litellm_chat_client_forwards_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_judge(model=...)`` must override ``ctx.model`` at the
+    actual completion call site, not only in the cache-key / audit
+    trail. Pre-fix regression: ``_resolve_model_name`` recorded the
+    override, but ``_LiteLLMChatClient.call()`` invoked
+    ``build_completion_kwargs(self.ctx, ...)`` with no model arg, so
+    the call ran under ctx.model while the cache + lockfile said
+    otherwise. Asserts that the model arrives unchanged at litellm.
+    """
+    from unittest.mock import MagicMock
+
+    from dataset_scout.judge import _LiteLLMChatClient
+
+    captured: dict[str, Any] = {}
+
+    def fake_completion(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = '{"verdict":"positive","subcategory":"x","confidence":0.9,"rationale":"y"}'
+        return resp
+
+    fake_litellm = MagicMock()
+    fake_litellm.completion.side_effect = fake_completion
+
+    monkeypatch.setattr("dataset_scout.judge.import_litellm", lambda: fake_litellm)
+
+    # ctx points at AOAI; override should win.
+    ctx = ScoutContext(
+        aoai_endpoint="https://example.openai.azure.com",
+        aoai_deployment="azure-deployment-name",
+    )
+    monkeypatch.setattr(
+        "dataset_scout.llm_client.make_token_provider",
+        lambda: (lambda: "tok"),
+    )
+    chat = _LiteLLMChatClient(ctx=ctx, model_override="github_copilot/gpt-5-mini")
+    chat.call(messages=[{"role": "user", "content": "hi"}], timeout_s=5.0)
+
+    assert captured["model"] == "github_copilot/gpt-5-mini"
+    # And the github_copilot/ branch must NOT have attached the Azure
+    # token provider — otherwise litellm sees a malformed config.
+    assert "azure_ad_token_provider" not in captured
+    assert "api_base" not in captured
