@@ -42,7 +42,7 @@ When `label_kind == "judged"`, the `judge` field is populated with:
 | `subcategory` | string | Short kebab-case classification, e.g. `"injection-system-prompt-extract"`. |
 | `confidence` | float `0.0–1.0` | Judge's *raw self-rated* confidence. |
 | `rationale` | string | One-sentence explanation. |
-| `model` | string | Judge model identifier, e.g. `"azure-openai/gpt-4o-2024-08"`. |
+| `model` | string | Judge model identifier (litellm-style), e.g. `"azure/gpt-4o-2024-08"`, `"github_copilot/gpt-5-mini"`, `"openai/gpt-4o-mini"`. |
 | `template_version` | string | Scout-internal prompt version (used for cache audit; not coordinated externally). |
 | `n_judges` | int `≥ 1` | `1` for single-judge runs. |
 | `agreement` | `"single" \| "majority" \| "unanimous"` | Aggregation rule. Always populated by the M10 judge: `"single"` when `n_judges == 1`, otherwise `"majority"` or `"unanimous"` per the run's configuration. The pydantic model declares `... \| None` for forward compatibility, but consumers can rely on a non-null value from any scout-produced corpus. |

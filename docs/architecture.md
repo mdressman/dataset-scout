@@ -22,7 +22,7 @@ HeuristicIntentParser  ────▶  Intent
 llm_available(ctx)?  ──── No ──▶  metadata-only mode
     │ Yes
     ▼
-decompose_intent (Azure OpenAI / Entra)        ←──  --decomposition-from
+decompose_intent (any LLM provider via litellm)  ←──  --decomposition-from
     │                                                 reuses a saved file
     ▼                                                 and skips this call
 DecompositionDirection × N
@@ -106,8 +106,10 @@ src/dataset_scout/
 ├── errors.py               DatasetScoutError, LLMError, SourceUnavailableError, …
 ├── events.py               ProgressEvent / ProgressEventKind
 ├── intent.py               HeuristicIntentParser + brief_smell_warnings
-├── llm_client.py           shared AOAI/Entra plumbing for LLM call sites
-├── decompose.py            LLM decomposition (Azure OpenAI + Entra)
+├── llm_client.py           provider-agnostic dispatch (Azure/Entra,
+│                           github_copilot, github, openai, anthropic)
+├── embedder.py             Embedder Protocol + sbert (default) / AOAI backends
+├── decompose.py            LLM decomposition (any litellm provider)
 ├── decomposition_io.py     decomposition.yaml read/write (--decomposition-from)
 ├── strategy.py             LLM per-candidate strategy assessor (row-aware)
 ├── coverage.py             LLM coverage-gap report
@@ -211,8 +213,10 @@ future cache keys: `(candidate.revision, probe.version, intent.stable_hash())`.
 The six **cheap** probes consume only `CandidateMetadata` (no row
 sampling). The **embedding label-intent fit** stage runs as a
 dedicated step between cheap probes and the shortlist — it embeds
-intent + candidate text via `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` and
-writes `Scorecard.label_intent_fit`. `label_structure` and
+intent + candidate text via the configured `Embedder` (default:
+local `sentence-transformers`; alternative: Azure OpenAI embeddings
+via `AZURE_OPENAI_EMBEDDING_DEPLOYMENT`) and writes
+`Scorecard.label_intent_fit`. `label_structure` and
 `schema_fingerprint` are not yet wired.
 
 ---
@@ -221,12 +225,12 @@ writes `Scorecard.label_intent_fit`. `label_structure` and
 
 ```python
 def llm_available(ctx: ScoutContext) -> bool:
-    return ctx.aoai_configured
+    return ctx.llm_configured     # any provider (DATASET_SCOUT_MODEL or AOAI fallback)
 ```
 
 Cheap one-liner. Importantly, it does **not** import `litellm` or
-`azure-identity` (~10 s import cost on first use). Users with no AOAI
-configured pay nothing.
+`azure-identity` (~10 s import cost on first use). Users with no LLM
+provider configured pay nothing.
 
 When `llm_available` returns False, the pipeline:
 
@@ -287,7 +291,7 @@ Three tiers:
 |---|---|---|
 | `pytest -m unit` | No | every PR (currently 154 tests) |
 | `pytest -m recorded` | respx-replayed | every PR |
-| `pytest -m live` | Real HF + AOAI | nightly only |
+| `pytest -m live` | Real HF + LLM provider | nightly only |
 
 LLM calls in tests are mocked at the `litellm.completion` boundary
 with canned JSON responses. Decomposition + (future) strategy
@@ -304,9 +308,9 @@ prompts are **snapshot-tested** — drift surfaces as a PR diff.
 | **Discovery (dataset platforms)** | HuggingFace + Kaggle source plugins, 6 metadata-driven probes, deduplicated multi-source candidate pool, `surfaced_by` provenance. Kaggle is discovery-only — `stream_sample`/`stream_rows` raise `SourceUnsupportedError` and curate classifies the candidate under `unsupported_source` with a hint. |
 | **Discovery (academic papers)** | Pipeline stage querying Semantic Scholar across NeurIPS / ICML / ICLR / SaTML, with arXiv as a targeted fallback for named-benchmark queries when S2 is unavailable or throttled. Round-robin per-direction queries, regex extraction of HF/Kaggle/GitHub dataset URLs from abstracts, deduplicated by arXiv ID, capped at 20 papers per recon. Cited HF / Kaggle datasets are promoted into the candidate pool with `surfaced_by` carrying the paper id. CLI: `--no-papers` opts out. Cached per `(venue-set, year-range, query)`. |
 | **Cache** | SQLite WAL at `<ctx.cache_dir>/cache.db`. Namespace-scoped TTL defaults with per-call override; age-based eviction at a 2 GB cap (`DATASET_SCOUT_CACHE_MAX_BYTES`); read paths never write. Wraps decompose, strategy, embedding, and paper-search calls. CLI: `datascout cache info\|prune\|clear`. |
-| **LLM decomposition** | Azure OpenAI / Entra. Brief → 3–7 adjacent search directions. Reusable via `--decomposition-from` for cheap iteration. Cached. Mode-detection falls back to metadata-only with an explicit notice when AOAI is absent. |
+| **LLM decomposition** | Provider-agnostic via litellm — GitHub Copilot, free GitHub Models tier, OpenAI, Anthropic, or Azure OpenAI / Entra. Brief → 3–7 adjacent search directions. Reusable via `--decomposition-from` for cheap iteration. Cached. Mode-detection falls back to metadata-only with an explicit notice when no provider is configured. |
 | **Row-aware strategy assessor** | Shortlists the top ~35 candidates per axis (LLM-cost budget; recalled-name rescues force-included); remaining candidates stay in the pool but are unassessed. For each shortlisted candidate: stream 8 real rows → LLM call → 1–4 ranked strategies from the 7-kind taxonomy with rationale, caveats, and a transform spec referencing **actual** columns and label values. Cached. |
-| **Embedding label-intent fit** | Dedicated pipeline stage between probes and the assessor. Embeds intent text + a deterministic candidate text (description + canonical row sample) via Azure OpenAI embeddings (`AZURE_OPENAI_EMBEDDING_DEPLOYMENT`). Writes `Scorecard.label_intent_fit`. Cached per text hash; the intent embedding is reused across candidates. |
+| **Embedding label-intent fit** | Dedicated pipeline stage between probes and the assessor. Embeds intent text + a deterministic candidate text (description + canonical row sample) via the pluggable `Embedder` Protocol — defaults to local `sentence-transformers` (no LLM provider needed); `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` activates the AOAI backend instead. Writes `Scorecard.label_intent_fit`. Cached per text hash + embedder name + model so sbert/AOAI vectors never collide; the intent embedding is reused across candidates. |
 | **Coverage-gap report** | What no candidate covers and where to source it. Leads `report.md`/`report.html` when notable. |
 | **Reports** | `report.md` (audit-friendly Markdown) and `report.html` (self-contained HTML, embedded CSS, color-coded strategy badges, no JS) rendered from a shared `ReconReportContext` view-model so the two can't drift. |
 | **`inspect`** | Single-candidate deep-dive: schema, Wilson 95% CI label distribution, length stats, license, strategy assessment. |
