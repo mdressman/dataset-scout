@@ -31,6 +31,7 @@ import sys  # noqa: E402  (intentional: env setdefault above must happen first)
 from pathlib import Path  # noqa: E402
 from typing import Annotated, Any  # noqa: E402
 
+import click  # noqa: E402
 import typer  # noqa: E402
 from rich.console import Console  # noqa: E402
 
@@ -81,9 +82,8 @@ def _interactive_review_decomposition(
     aborted. The decomposition is written to `<out>/decomposition.yaml`
     so a subsequent run can resume via `--decomposition-from`.
 
-    Cross-platform editor handling via `typer.edit()` (delegates to
-    click.edit, which honours $EDITOR / $VISUAL or falls back to a
-    sensible per-OS default).
+    Cross-platform editor handling via `click.edit()` (which honours
+    $EDITOR / $VISUAL or falls back to a sensible per-OS default).
     """
     from dataset_scout.decompose import decompose_intent
     from dataset_scout.decomposition_io import load_decomposition, write_decomposition
@@ -128,7 +128,7 @@ def _interactive_review_decomposition(
             )
             return None
         if choice in {"e", "edit"}:
-            edited_text = typer.edit(yaml_path.read_text(encoding="utf-8"))
+            edited_text = click.edit(yaml_path.read_text(encoding="utf-8"))
             if edited_text is None:
                 # Editor was closed without saving (or unavailable).
                 err.print("[yellow]No changes detected; using original directions.[/yellow]")
