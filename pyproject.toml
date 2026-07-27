@@ -60,7 +60,7 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.15.20",
   "mypy>=1.10",
-  "respx>=0.21",
+  "respx>=0.23.1",
 ]
 
 [project.scripts]
@@ -90,7 +90,7 @@ dev-dependencies = [
   "pytest-cov>=5.0",
   "ruff>=0.15.20",
   "mypy>=1.10",
-  "respx>=0.21",
+  "respx>=0.23.1",
 ]
 
 [tool.ruff]
