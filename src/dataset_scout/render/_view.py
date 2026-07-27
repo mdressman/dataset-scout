@@ -24,6 +24,15 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from dataset_scout.core import ReconResult, Scorecard
+from dataset_scout.pipeline import LLM_RUNTIME_HINT, METADATA_ONLY_NOTICE
+
+# Substring sentinels lifted from the pipeline notice constants so that
+# any future rewording of the notice text in pipeline.py is mirrored
+# here automatically. The first sentence of each notice is unique
+# enough to identify the mode; matching the entire string would be
+# too brittle (notices can be lightly mutated by callers).
+_METADATA_ONLY_SENTINEL = METADATA_ONLY_NOTICE.split(":", 1)[0]
+_LLM_RUNTIME_SENTINEL = LLM_RUNTIME_HINT.split("(", 1)[0].strip()
 
 # ─── Per-card verdict ───────────────────────────────────────────────
 
@@ -344,8 +353,8 @@ class ReconReportContext:
     def from_result(
         cls, result: ReconResult, *, min_strategy_confidence: float = 0.5
     ) -> ReconReportContext:
-        metadata_only = any("Azure OpenAI is not configured" in n for n in result.notices)
-        llm_runtime_error = any("Azure OpenAI was configured but" in n for n in result.notices)
+        metadata_only = any(_METADATA_ONLY_SENTINEL in n for n in result.notices)
+        llm_runtime_error = any(_LLM_RUNTIME_SENTINEL in n for n in result.notices)
         has_strategies = any(sc.strategies for sc in result.candidates)
         has_decomposition = bool(result.coverage and result.coverage.decomposition)
         has_gaps = bool(result.coverage and result.coverage.semantic_gaps)

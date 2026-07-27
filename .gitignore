@@ -25,7 +25,8 @@ datascout-out/
 mycorpus/
 *.local.*
 .env
-.env.local
+.env.*
+!.env.example
 
 # OS / IDE
 .DS_Store

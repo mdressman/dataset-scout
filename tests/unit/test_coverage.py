@@ -148,7 +148,7 @@ def test_build_coverage_returns_empty_when_llm_says_no_gaps(
 
 
 def test_build_coverage_raises_when_unconfigured() -> None:
-    with pytest.raises(LLMError, match="Azure OpenAI is not configured"):
+    with pytest.raises(LLMError, match="No LLM provider configured"):
         build_coverage_report(Intent(raw_brief="x"), [], _sample_scorecards(), ctx=ScoutContext())
 
 

@@ -9,12 +9,13 @@ Single litellm call. Inputs: intent, decomposition directions, and
 the best (or top-2 close-confidence) strategies per shortlisted
 candidate. Output: list[CoverageGap].
 
-Same Azure OpenAI / Entra plumbing as decompose / strategy via
-`llm_client`.
+Provider-agnostic via `llm_client`: routes through whichever provider
+``ctx.model`` (or the legacy AOAI fields) configures.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -30,16 +31,29 @@ from dataset_scout.core import (
 from dataset_scout.errors import LLMError
 from dataset_scout.llm_client import (
     build_completion_kwargs,
+    effective_model_id,
     extract_content,
     import_litellm,
     make_token_provider,
 )
 
 if TYPE_CHECKING:
+    from dataset_scout.cache import Cache
     from dataset_scout.context import ScoutContext
 
 
-COVERAGE_VERSION = "1"
+# Back-compat shim: tests monkeypatch this name to stub the Entra
+# credential acquisition. Coverage no longer invokes it eagerly — it's
+# now reached lazily via llm_client.resolve_llm_params only on the
+# Azure branch — but the symbol stays so existing test patches don't
+# break.
+_make_token_provider = make_token_provider
+
+
+# Bumped when prompt/response handling changes. v2 introduces
+# effective-model-id keying (was ctx.aoai_deployment) so cross-provider
+# runs don't pollute each other.
+COVERAGE_VERSION = "2"
 
 # Maximum candidates included in the prompt. Coverage prompt is a
 # single LLM call so we cap the size of the candidate summary to keep
@@ -180,10 +194,6 @@ def render_coverage_prompt(
 # ─── coverage call ──────────────────────────────────────────────────
 
 
-# Re-exported so tests can stub the credential.
-_make_token_provider = make_token_provider
-
-
 def _parse_response(content: str) -> CoverageResponse:
     payload = json.loads(content)
     return CoverageResponse.model_validate(payload)
@@ -196,29 +206,49 @@ def build_coverage_report(
     *,
     ctx: ScoutContext,
     timeout_s: float = 30.0,
+    cache: Cache | None = None,
 ) -> list[CoverageGap]:
     """Ask the LLM to identify coverage gaps in the candidate set.
 
     Single completion call, one retry on Pydantic validation failure.
     Empty list returned cleanly when coverage is honestly good or when
     no scorecards were assessed.
+
+    When ``cache`` is provided, identical (rendered prompt,
+    COVERAGE_VERSION, effective-model-id) inputs return without an LLM
+    call — useful when the user is iterating on report rendering.
     """
-    if not ctx.aoai_configured:
+    if not ctx.llm_configured:
         raise LLMError(
-            "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT "
-            "and AZURE_OPENAI_DEPLOYMENT (and run `az login` for Entra "
-            "auth)."
+            "No LLM provider configured. Set DATASET_SCOUT_MODEL "
+            "(e.g. 'github_copilot/gpt-5-mini' or 'github/gpt-4o-mini'), "
+            "or AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT (and run "
+            "`az login` for Entra auth)."
         )
 
-    litellm = import_litellm()
-    token_provider = _make_token_provider()
     prompt = render_coverage_prompt(intent, directions, scorecards)
+
+    cache_key: str | None = None
+    if cache is not None:
+        resolved = effective_model_id(ctx) or ""
+        cache_key = hashlib.sha256(
+            (COVERAGE_VERSION + "\n" + resolved + "\n" + prompt).encode("utf-8")
+        ).hexdigest()
+        cached = cache.get_json("coverage", cache_key)
+        if cached is not None:
+            try:
+                payload = CoverageResponse.model_validate(cached)
+            except ValidationError:
+                pass
+            else:
+                return list(payload.gaps)
+
+    litellm = import_litellm()
     completion_kwargs = build_completion_kwargs(
         ctx,
         messages=[{"role": "user", "content": prompt}],
         response_format=CoverageResponse,
         timeout_s=timeout_s,
-        token_provider=token_provider,
     )
 
     last_parse_error: Exception | None = None
@@ -240,5 +270,8 @@ def build_coverage_report(
     if parsed is None:
         msg = f"LLM returned invalid JSON twice: {last_parse_error}"
         raise LLMError(msg) from last_parse_error
+
+    if cache is not None and cache_key is not None:
+        cache.set_json("coverage", cache_key, parsed.model_dump(mode="json"))
 
     return list(parsed.gaps)

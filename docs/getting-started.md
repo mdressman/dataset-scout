@@ -31,20 +31,35 @@ uv tool install git+https://github.com/mdressman/dataset-scout
 
 # Or in a project: uv add git+https://github.com/mdressman/dataset-scout
 
-# Configure Azure OpenAI (Entra auth — no API keys)
-az login
+# Configure ONE LLM provider — pick the row that matches you:
 cp .env.example .env
-# Edit .env to set:
+# Then edit .env to set ONE of:
+#
+#   # Easiest if you already pay for Copilot (gray-area TOS — see Configuration)
+#   DATASET_SCOUT_MODEL=github_copilot/gpt-5-mini
+#
+#   # Free tier, no subscription — needs GITHUB_TOKEN with `models:read`
+#   DATASET_SCOUT_MODEL=github/gpt-4o-mini
+#   GITHUB_TOKEN=github_pat_...
+#
+#   # Bring-your-own API key
+#   DATASET_SCOUT_MODEL=openai/gpt-4o-mini
+#   OPENAI_API_KEY=sk-...
+#
+#   # Enterprise / Azure-hosted (run `az login` once first)
 #   AZURE_OPENAI_ENDPOINT=https://my-aoai.openai.azure.com
 #   AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+#
 #   HUGGINGFACE_HUB_TOKEN=hf_...        (optional, raises HF rate limits)
 ```
 
-Without the AOAI block dataset-scout runs in metadata-only mode
-(HuggingFace search + cheap probes only). It tells you what to set.
+Without an LLM provider configured, dataset-scout runs in
+metadata-only mode (HuggingFace search + cheap probes only). It
+tells you what to set.
 
 See [`configuration.md`](configuration.md) for every recognised
-variable and CI / managed-identity options.
+variable, the per-provider trade-offs, and CI / managed-identity
+options.
 
 ---
 

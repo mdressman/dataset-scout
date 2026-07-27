@@ -196,12 +196,13 @@ def _direction_queries(direction: DecompositionDirection) -> list[str]:
     """Build per-keyword HF lexical queries for a decomposition direction.
 
     The decomposer returns 3-5 short academic-style keywords per direction
-    in `direction.keywords`. The keyword-expansion stage (when AOAI is
-    available) also populates `direction.dataset_keywords` with HF-uploader-
-    style compound-noun phrases ("mental health chat", "counseling
-    dialogue") that complement the academic terms. Empirically these
-    expanded phrases catch datasets that the abstract keywords miss
-    entirely (uploaders don't write "parasocial bonds" in dataset ids).
+    in `direction.keywords`. The keyword-expansion stage (when an LLM
+    provider is available) also populates `direction.dataset_keywords`
+    with HF-uploader- style compound-noun phrases ("mental health chat",
+    "counseling dialogue") that complement the academic terms.
+    Empirically these expanded phrases catch datasets that the abstract
+    keywords miss entirely (uploaders don't write "parasocial bonds"
+    in dataset ids).
 
     Strategy: highest-precision first (recalled named benchmarks),
     then HF-uploader-style compound nouns, then academic-style as

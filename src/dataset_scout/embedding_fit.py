@@ -7,24 +7,31 @@ out noise, embedding fit floats genuinely-relevant candidates, then
 the assessor pays the per-call cost on a focused shortlist.
 
 Why a stage and not a Probe? Probes are stateless metadata-only by
-contract; embedding fit needs row sampling AND an LLM (embeddings)
+contract; embedding fit needs row sampling AND a backend embedding
 call. Bolting that onto the Probe protocol would distort it. The
 pipeline owns this stage and writes results into the existing
-`Scorecard.label_intent_fit: SubScore | None` slot.
+``Scorecard.label_intent_fit: SubScore | None`` slot.
 
-Auth: same Azure OpenAI / Entra path as decompose / strategy.
-Configured via `ctx.aoai_embedding_deployment` (env:
-`AZURE_OPENAI_EMBEDDING_DEPLOYMENT`). When unset, this stage no-ops
-gracefully — the rest of the pipeline still runs.
+Backend: routed through :mod:`dataset_scout.embedder`. Default is local
+sentence-transformers (set ``DATASET_SCOUT_EMBEDDING_BACKEND=sbert``,
+needs the ``dataset-scout[local-embeddings]`` extra). Legacy AOAI
+embeddings remain available via
+``DATASET_SCOUT_EMBEDDING_BACKEND=aoai`` plus the existing
+``AZURE_OPENAI_EMBEDDING_DEPLOYMENT`` env var. When no backend is
+available the stage no-ops gracefully — the rest of the pipeline still
+runs.
 
-Caching: per-text-hash, persistent across runs in the
-`embedding` cache namespace. The intent embedding is cached too, so
-re-running with the same brief on a fresh candidate set only pays for
-new candidate embeddings.
+Caching: per-text-hash, persistent across runs in the ``embedding``
+cache namespace. The intent embedding is cached too, so re-running
+with the same brief on a fresh candidate set only pays for new
+candidate embeddings. Cache keys include the embedder ``name`` +
+``model`` so a backend switch (sbert ↔ aoai) can't serve stale
+cross-backend vectors.
 
 Determinism: candidate text is composed from a fixed-seed sample of
-rows (`seed=42`, `n=5`), serialised in a stable canonical form. Same
-candidate x same revision -> same text -> same cache key -> same score.
+rows (``seed=42``, ``n=5``), serialised in a stable canonical form.
+Same candidate x same revision -> same text -> same cache key -> same
+score.
 """
 
 from __future__ import annotations
@@ -43,8 +50,13 @@ from dataset_scout.core import (
     Scorecard,
     SubScore,
 )
+from dataset_scout.embedder import Embedder, build_embedder
 from dataset_scout.errors import LLMError, SourceUnsupportedError
-from dataset_scout.llm_client import import_litellm, make_token_provider
+
+# Re-exported for back-compat with tests that monkeypatch these names
+# at the embedding_fit module path. Production code goes through the
+# Embedder protocol now and never invokes either function from here.
+from dataset_scout.llm_client import import_litellm, make_token_provider  # noqa: F401
 
 if TYPE_CHECKING:
     from dataset_scout.cache import Cache
@@ -53,8 +65,10 @@ if TYPE_CHECKING:
 
 
 # Bumped when the prompt-construction policy or sampling shape changes
-# in a way that would invalidate cached embeddings.
-EMBEDDING_FIT_VERSION = "1"
+# in a way that would invalidate cached embeddings. v2 introduces
+# embedder-name + embedder-model keying (was ctx.aoai_embedding_deployment)
+# so cross-backend runs (sbert ↔ aoai) don't pollute each other.
+EMBEDDING_FIT_VERSION = "2"
 
 # How many sample rows to pull per candidate.
 _SAMPLE_N = 5
@@ -82,38 +96,35 @@ def assess_label_intent_fit(
     directions: list[DecompositionDirection] | None = None,
     cache: Cache | None = None,
     timeout_s: float = 30.0,
+    embedder: Embedder | None = None,
 ) -> int:
-    """Fill in `Scorecard.label_intent_fit` for each scorecard, in place.
+    """Fill in ``Scorecard.label_intent_fit`` for each scorecard, in place.
 
     Returns the number of scorecards updated. Returns 0 (and no-ops) if:
-      - `ctx.aoai_embedding_deployment` is unset.
-      - `ctx` is not AOAI-configured (no endpoint).
-      - `litellm` is unavailable.
+      - no scorecards were supplied, OR
+      - ``embedder`` is None and :func:`build_embedder` returns None
+        (no backend available — sbert not installed and no AOAI config).
+
+    Tests can inject ``embedder=`` directly to bypass the factory and
+    avoid mocking torch / litellm internals.
 
     Per-candidate failures (sample fetch, embedding call, parse) are
-    logged and the candidate's `label_intent_fit` is left as None — the
-    rest of the run is unaffected.
+    logged and the candidate's ``label_intent_fit`` is left as None —
+    the rest of the run is unaffected.
     """
-    if not ctx.aoai_configured or not ctx.aoai_embedding_deployment:
-        return 0
     if not scorecards:
         return 0
 
-    try:
-        litellm = import_litellm()
-    except LLMError as exc:
-        _log.warning("embedding-fit stage skipped: %s", exc)
+    if embedder is None:
+        embedder = build_embedder(ctx)
+    if embedder is None:
         return 0
 
-    token_provider = make_token_provider()
     intent_text = _compose_intent_text(intent, directions or [])
     intent_vec = _get_or_compute_embedding(
         intent_text,
-        ctx=ctx,
-        litellm=litellm,
-        token_provider=token_provider,
+        embedder=embedder,
         cache=cache,
-        timeout_s=timeout_s,
     )
     if intent_vec is None:
         # Hard failure on the intent embedding: skip the whole stage
@@ -129,11 +140,8 @@ def assess_label_intent_fit(
         cand_text = _compose_candidate_text(cand, sample_rows)
         cand_vec = _get_or_compute_embedding(
             cand_text,
-            ctx=ctx,
-            litellm=litellm,
-            token_provider=token_provider,
+            embedder=embedder,
             cache=cache,
-            timeout_s=timeout_s,
         )
         if cand_vec is None:
             sc.label_intent_fit = SubScore(
@@ -150,14 +158,14 @@ def assess_label_intent_fit(
             continue
 
         cosine = _cosine(intent_vec, cand_vec)
-        # Cosine on OpenAI embeddings is in [-1, 1]; clamp to [0, 1] for
-        # a friendlier signal in the report. Negative cosines on these
-        # embeddings are extremely rare and not informative.
+        # Cosine on common embedding models is in [-1, 1]; clamp to
+        # [0, 1] for a friendlier signal in the report. Negative
+        # cosines on these embeddings are rare and not informative.
         score = max(0.0, cosine)
         evidence_detail = (
             f"cosine={cosine:.3f} (clamped {score:.3f}); "
             f"sample_n={len(sample_rows)}; "
-            f"deployment={ctx.aoai_embedding_deployment}"
+            f"backend={embedder.name}/{embedder.model}"
         )
         status = "ok" if sample_rows else "low_confidence"
         sc.label_intent_fit = SubScore(
@@ -299,76 +307,54 @@ def _fetch_sample_rows(
 # ─── embedding call (with cache) ───────────────────────────────────
 
 
-def _embedding_cache_key(text: str, deployment: str) -> str:
-    canonical = f"{EMBEDDING_FIT_VERSION}\n{deployment}\n{text}"
+def _embedding_cache_key(text: str, *, embedder_name: str, embedder_model: str) -> str:
+    """Cache key includes backend identity so cross-backend lookups miss.
+
+    A 384-dim sbert vector and a 1536-dim AOAI vector for the same
+    text are not interchangeable. Keying on
+    ``embedder.name + embedder.model`` ensures a backend switch
+    cleanly invalidates without poisoning the existing cache.
+    """
+    canonical = f"{EMBEDDING_FIT_VERSION}\n{embedder_name}\n{embedder_model}\n{text}"
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _get_or_compute_embedding(
     text: str,
     *,
-    ctx: ScoutContext,
-    litellm: Any,
-    token_provider: Any,
+    embedder: Embedder,
     cache: Cache | None,
-    timeout_s: float,
 ) -> list[float] | None:
-    """Return an embedding vector for `text`, hitting cache when possible.
+    """Return an embedding vector for ``text``, hitting cache when possible.
 
     Returns None on call failure (logged at WARNING).
     """
-    deployment = ctx.aoai_embedding_deployment or ""
+    key: str | None = None
     if cache is not None:
-        key = _embedding_cache_key(text, deployment)
+        key = _embedding_cache_key(
+            text, embedder_name=embedder.name, embedder_model=embedder.model
+        )
         cached = cache.get_json("embedding", key)
         if isinstance(cached, list) and all(isinstance(v, (int, float)) for v in cached):
             return [float(v) for v in cached]
 
     try:
-        response = litellm.embedding(
-            model=f"azure/{deployment}",
-            input=[text],
-            api_base=ctx.aoai_endpoint,
-            api_version=ctx.aoai_api_version,
-            azure_ad_token_provider=token_provider,
-            timeout=timeout_s,
-        )
-    except Exception as exc:
+        vecs = embedder.embed([text])
+    except LLMError as exc:
+        _log.warning("embedding call failed: %s", exc)
+        return None
+    except Exception as exc:  # pragma: no cover - defensive
         _log.warning("embedding call failed: %s", exc)
         return None
 
-    vec = _extract_embedding(response)
-    if vec is None:
-        _log.warning("embedding response had unexpected shape")
+    if not vecs:
+        _log.warning("embedding response had unexpected shape (empty)")
         return None
+    vec = vecs[0]
 
-    if cache is not None:
+    if cache is not None and key is not None:
         cache.set_json("embedding", key, vec)
     return vec
-
-
-def _extract_embedding(response: Any) -> list[float] | None:
-    """Pull the first embedding vector from a litellm.embedding response.
-
-    Tolerates both attribute access (`.data[0].embedding`) and dict
-    access (`response["data"][0]["embedding"]`); either is what
-    litellm has shipped at various points.
-    """
-    try:
-        data = getattr(response, "data", None)
-        if data is None and isinstance(response, dict):
-            data = response.get("data")
-        if not data:
-            return None
-        item = data[0]
-        embedding = getattr(item, "embedding", None)
-        if embedding is None and isinstance(item, dict):
-            embedding = item.get("embedding")
-        if not embedding:
-            return None
-        return [float(v) for v in embedding]
-    except (AttributeError, IndexError, TypeError, ValueError):
-        return None
 
 
 # ─── math ──────────────────────────────────────────────────────────

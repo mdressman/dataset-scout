@@ -526,7 +526,7 @@ class InspectResult(BaseModel):
     length_stats: LengthStats | None = None
     sample_rows: list[dict[str, Any]] = Field(default_factory=list)
 
-    # LLM assessment when AOAI is configured.
+    # LLM assessment when an LLM provider is configured.
     strategies: list[Strategy] = Field(default_factory=list)
     intent_used: Intent | None = None
 

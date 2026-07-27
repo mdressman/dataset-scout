@@ -31,8 +31,8 @@ The pipeline picks one of two modes at start-up.
 
 | Mode | Trigger | What runs |
 |---|---|---|
-| **Full** | Azure OpenAI configured (`AZURE_OPENAI_ENDPOINT` + `_DEPLOYMENT`) | Brief parsing → LLM decomposition → multi-source search (HuggingFace, Kaggle if creds, plus Semantic Scholar / arXiv paper-search promoting cited HF/Kaggle datasets) → cheap probes → two-stage shortlist → per-candidate strategy assessor → coverage gaps → ranked report + `recipe.draft.yaml` |
-| **Metadata-only** | AOAI not configured | Brief parsing → single-query search (HuggingFace, Kaggle if creds) → cheap probes (no decomposition, no paper search, no strategies, no recipe draft) |
+| **Full** | Any LLM provider configured — `DATASET_SCOUT_MODEL` set (e.g. `github_copilot/...`, `github/...`, `openai/...`, `anthropic/...`, `azure/...`) **OR** the legacy `AZURE_OPENAI_ENDPOINT` + `_DEPLOYMENT` pair | Brief parsing → LLM decomposition → multi-source search (HuggingFace, Kaggle if creds, plus Semantic Scholar / arXiv paper-search promoting cited HF/Kaggle datasets) → cheap probes → two-stage shortlist → per-candidate strategy assessor → coverage gaps → ranked report + `recipe.draft.yaml` |
+| **Metadata-only** | No LLM provider configured | Brief parsing → single-query search (HuggingFace, Kaggle if creds) → cheap probes (no decomposition, no paper search, no strategies, no recipe draft) |
 
 The fallback is **explicit and noisy** — you'll see a notice on stderr
 and a prominent header in `report.md` telling you what to set. No

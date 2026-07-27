@@ -87,6 +87,7 @@ datascout recon "<brief>" [options]
 | `--license TEXT` | permissive set | License allowlist; repeat for multiple. |
 | `--min-strategy-confidence FLOAT` | `0.5` | Strategies below this confidence are filtered out of the draft recipe. Recipe-authoritative — `curate` defaults to the value baked into the recipe. |
 | `--decomposition-from PATH` | — | Reuse a hand-edited `decomposition.yaml` instead of paying for a fresh LLM decompose call. |
+| `--model TEXT` | `$DATASET_SCOUT_MODEL` → AOAI fallback | Override the LLM model id (litellm-style). Examples: `github_copilot/gpt-5-mini`, `github/gpt-4o-mini`, `openai/gpt-4o`, `azure/<deployment>`. |
 | `--out PATH` | `datascout-out/` | Output directory. |
 | `--no-papers` | — | Skip paper search (Semantic Scholar + arXiv). |
 
@@ -138,7 +139,7 @@ the brief should express:
 - `--threat-families` — comma-separated families to inject into the
   parsed Intent. Use only when the brief is genuinely ambiguous.
 - `--no-explore` — skip LLM decomposition. Useful for reproducing
-  metadata-only behavior when AOAI is configured.
+  metadata-only behavior when an LLM provider is configured.
 
 ---
 
@@ -166,13 +167,13 @@ datascout inspect <source>:<id>[@revision] [options]
 5. **Label distribution** — count and Wilson 95% CI per value when a label column is detected.
 6. **Text-length stats** — min / median / max characters for the heuristically-picked text column.
 7. **Sample rows** — first five.
-8. **Strategy assessment** — when `--intent-from` or `--brief` is supplied AND AOAI is configured.
+8. **Strategy assessment** — when `--intent-from` or `--brief` is supplied AND an LLM provider is configured.
 
 ```bash
 # Quick metadata-only deep-dive
 datascout inspect huggingface:bench-llm/or-bench
 
-# With a fresh brief — adds LLM strategy assessment if AOAI is set
+# With a fresh brief — adds LLM strategy assessment if an LLM provider is set
 datascout inspect huggingface:bench-llm/or-bench --brief "refusal-labeled corpora for support agents"
 
 # Re-use the Intent from your latest recon
@@ -384,8 +385,8 @@ they're "no decision", not wrong.
 
 ```bash
 # Compare two judge models on the same gold set
-datascout judge ./corpus --axis x --out ./judged-A --model azure-openai/gpt-4o
-datascout judge ./corpus --axis x --out ./judged-B --model azure-openai/gpt-4o-mini
+datascout judge ./corpus --axis x --out ./judged-A --model azure/gpt-4o
+datascout judge ./corpus --axis x --out ./judged-B --model github_copilot/gpt-5-mini
 datascout eval ./judged-A --against ./gold --axis x   # → P/R/F1 for A
 datascout eval ./judged-B --against ./gold --axis x   # → P/R/F1 for B
 ```
@@ -475,5 +476,5 @@ datascout sources disable <name>   # not yet implemented
 ## See also
 
 - [Concepts](concepts.md) — how to write a brief, what the report's framing language means.
-- [Configuration](configuration.md) — `.env`, Azure OpenAI, HF.
+- [Configuration](configuration.md) — `.env`, the LLM provider matrix (GitHub Copilot, GitHub Models, OpenAI, Anthropic, Azure / Entra), HF.
 - [Architecture](architecture.md) — what runs under each verb.

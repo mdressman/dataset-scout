@@ -268,7 +268,7 @@ def test_view_context_metadata_only_flag():
         intent=Intent(raw_brief="x"),
         candidates=[],
         sources_searched=[],
-        notices=["Azure OpenAI is not configured: ..."],
+        notices=["Running in metadata-only mode: no LLM provider is configured, ..."],
     )
     ctx = ReconReportContext.from_result(result)
     assert ctx.metadata_only is True

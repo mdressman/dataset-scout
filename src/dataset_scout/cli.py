@@ -281,6 +281,23 @@ def recon(
             ),
         ),
     ] = False,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help=(
+                "Override the LLM model id (litellm-style). Examples: "
+                "'github_copilot/gpt-5-mini' (uses your GitHub Copilot "
+                "subscription via OAuth device-code flow on first run), "
+                "'github/gpt-4o-mini' (uses GITHUB_TOKEN against the free "
+                "GitHub Models tier), 'openai/gpt-4o' (uses OPENAI_API_KEY), "
+                "'azure/<deployment>' (uses Entra). Falls back to "
+                "$DATASET_SCOUT_MODEL, then to the AZURE_OPENAI_* config. "
+                "When unset and no Azure config is present, recon runs in "
+                "metadata-only mode (no decompose / strategy / coverage)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     from dataset_scout.context import ScoutContext
     from dataset_scout.decomposition_io import load_decomposition, write_decomposition
@@ -306,6 +323,9 @@ def recon(
         overrides["threat_families"] = list(threat_families)
 
     ctx = ScoutContext.from_env(is_tty=sys.stderr.isatty())
+    if model:
+        # CLI flag wins. ScoutContext is frozen Pydantic so we copy.
+        ctx = ctx.model_copy(update={"model": model})
 
     directions_override = None
     if decomposition_from is not None:
@@ -418,6 +438,21 @@ def decompose(
             help="Optional path to write decomposition.yaml; otherwise stdout-only.",
         ),
     ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help=(
+                "Override the LLM model id (litellm-style). Examples: "
+                "'github_copilot/gpt-5-mini' (uses your GitHub Copilot "
+                "subscription via OAuth device-code flow on first run), "
+                "'github/gpt-4o-mini' (uses GITHUB_TOKEN against the free "
+                "GitHub Models tier), 'openai/gpt-4o' (uses OPENAI_API_KEY), "
+                "'azure/<deployment>' (uses Entra). Falls back to "
+                "$DATASET_SCOUT_MODEL, then to the AZURE_OPENAI_* config."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run only the LLM decomposition step.
 
@@ -433,11 +468,18 @@ def decompose(
     from dataset_scout.intent import HeuristicIntentParser
 
     ctx = ScoutContext.from_env(is_tty=sys.stderr.isatty())
+    if model:
+        # CLI flag wins. ScoutContext is frozen Pydantic so we copy.
+        ctx = ctx.model_copy(update={"model": model})
+
     if not llm_available(ctx):
         err.print(
-            "[red]error:[/red] Azure OpenAI is not configured. "
-            "Set AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT and "
-            "run `az login`."
+            "[red]error:[/red] No LLM provider configured. Set "
+            "[bold]--model[/bold] (e.g. 'github_copilot/gpt-5-mini'), or "
+            "[bold]DATASET_SCOUT_MODEL[/bold], or the legacy "
+            "[bold]AZURE_OPENAI_ENDPOINT[/bold] + "
+            "[bold]AZURE_OPENAI_DEPLOYMENT[/bold] env vars (and run "
+            "`az login`)."
         )
         raise typer.Exit(code=1)
 

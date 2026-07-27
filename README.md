@@ -64,9 +64,13 @@ drift — pick whichever channel fits the audience.
 ## The loop
 
 ```bash
-az login                                                     # Entra auth for AOAI
-echo "AZURE_OPENAI_ENDPOINT=https://my-aoai.openai.azure.com" > .env
-echo "AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini"                  >> .env
+# Pick ONE LLM provider — see Configuration for the full matrix.
+echo "DATASET_SCOUT_MODEL=github_copilot/gpt-5-mini" > .env  # uses your GitHub Copilot subscription
+# OR: echo "DATASET_SCOUT_MODEL=github/gpt-4o-mini" > .env   # free GitHub Models tier (needs GITHUB_TOKEN)
+# OR: az login && cat <<EOF > .env                           # Azure OpenAI / Entra
+# AZURE_OPENAI_ENDPOINT=https://my-aoai.openai.azure.com
+# AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+# EOF
 
 # 1. Iterate on the brief cheaply (~5s, one LLM call)
 datascout decompose "your brief here" --out scratch/
@@ -80,6 +84,13 @@ datascout recon "your brief here" \
 # → scratch/recon/results.json     ← machine-readable
 # → scratch/recon/recipe.draft.yaml + decomposition.yaml
 ```
+
+> **No Azure account?** `DATASET_SCOUT_MODEL=github_copilot/gpt-5-mini`
+> reuses the GitHub Copilot subscription you already have. First call
+> opens an OAuth device-code flow; thereafter the token is cached in
+> `~/.config/litellm/github_copilot/`. See
+> [Configuration](docs/configuration.md) for the trade-offs and the
+> full provider list.
 
 > **Tip:** `decompose` is the cheap brief-iteration loop. Use it to
 > refine your brief before paying for the full ~2-minute recon.
@@ -172,8 +183,10 @@ loop generalizes.
   worked examples.
 - **[Architecture](docs/architecture.md)** — pipeline diagram,
   module layout, source plugin contract, milestone status.
-- **[Configuration](docs/configuration.md)** — `ScoutContext`, AOAI +
-  Entra setup, HuggingFace tokens, every recognised env var.
+- **[Configuration](docs/configuration.md)** — `ScoutContext`, the
+  multi-provider LLM matrix (GitHub Copilot, GitHub Models, OpenAI,
+  Anthropic, Azure OpenAI / Entra), HuggingFace tokens, every
+  recognised env var.
 
 ---
 
