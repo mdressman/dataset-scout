@@ -1,0 +1,90 @@
+name: Dependabot auto-merge
+
+# Dependabot bumps pile up fast here. `main protection` requires strict
+# up-to-date branches, and nearly every Python bump touches pyproject.toml
+# or uv.lock — so each merge immediately pushes the rest BEHIND and the
+# queue only ever grows. Eleven PRs, five of them security advisories, had
+# stacked up before this landed.
+#
+# Merges itself:
+#   - any minor or patch bump
+#   - major bumps of indirect (transitive) deps — uv.lock pins such as
+#     cryptography or setuptools that nothing under src/ imports directly
+#
+# Still waits for a human:
+#   - major bumps of direct deps (rich, litellm, mypy, actions/checkout, ...)
+#
+# How the merge happens
+# ---------------------
+# `gh pr merge --auto` hands off to GitHub's native auto-merge, which fires
+# only once every required status check is green. The approval before it is
+# what satisfies `required_approving_review_count: 1`; `main protection`
+# deliberately sets `require_code_owner_review: false`, because a bot can
+# never be listed in CODEOWNERS and GitHub rejects github-actions[bot] as a
+# ruleset bypass actor on a user-owned repo ("must be part of the ruleset
+# source or owner organization").
+#
+# Commenting "@dependabot merge" is NOT a workable alternative — Dependabot
+# ignores commands issued with GITHUB_TOKEN, so it would silently no-op.
+#
+# `synchronize` is in the trigger list on purpose: `main protection` sets
+# dismiss_stale_reviews_on_push, so every Dependabot rebase drops the
+# approval and it has to be reissued. Dependabot rebases these branches
+# itself — auto-merge never pushes — which is also what keeps
+# require_last_push_approval satisfiable: dependabot[bot] pushes,
+# github-actions[bot] approves, two different actors.
+#
+# `pull_request_target` is required because Dependabot-triggered
+# `pull_request` runs get a read-only GITHUB_TOKEN. The usual
+# pull_request_target injection risk does not apply: this workflow never
+# checks out, builds, or executes pull request code. It only calls the API.
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve and enable auto-merge
+        if: >-
+          steps.metadata.outputs.update-type != 'version-update:semver-major'
+          || steps.metadata.outputs.dependency-type == 'indirect'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr review --approve "$PR_URL"
+
+          # Re-enabling auto-merge on a PR that already has it is an error,
+          # and `synchronize` brings us back through here on every rebase.
+          already=$(gh pr view "$PR_URL" --json autoMergeRequest \
+            --jq '.autoMergeRequest != null')
+          if [ "$already" = "true" ]; then
+            echo "Auto-merge already enabled; approval refreshed."
+          else
+            gh pr merge --auto --squash "$PR_URL"
+          fi
+
+      - name: Flag direct major bump for manual review
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-major'
+          && steps.metadata.outputs.dependency-type != 'indirect'
+        env:
+          DEPS: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          echo "::notice::Not auto-merging: $DEPS is a major bump of a direct dependency and needs a human look."
