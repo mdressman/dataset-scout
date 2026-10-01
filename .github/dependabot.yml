@@ -1,10 +1,10 @@
 version: 2
 
-# Minor and patch bumps — plus major bumps of indirect (transitive) deps —
-# are approved and merged automatically by
-# .github/workflows/dependabot-auto-merge.yml. It uses GitHub's native
-# auto-merge, so all 8 required status checks still gate every merge.
-# Major bumps of direct deps stay open and wait for a human.
+# Merged automatically by .github/workflows/dependabot-auto-merge.yml:
+# minor and patch bumps, plus major bumps of indirect (transitive) deps.
+# It uses GitHub's native auto-merge, so all 8 required status checks still
+# gate every merge. Major bumps of direct deps — and anything Dependabot
+# reports no update-type for — stay open and wait for a human.
 updates:
   # Keep GitHub Actions versions current.
   - package-ecosystem: github-actions
@@ -20,11 +20,21 @@ updates:
       actions:
         patterns: ["*"]
 
-  # Python dependencies declared in pyproject.toml. uv.lock is the
-  # source of truth at install time; Dependabot opens PRs against
-  # pyproject and CI re-resolves via `uv sync --dev`.
+  # Python dependencies. uv.lock is the source of truth at install time;
+  # CI re-resolves via `uv sync --dev`.
+  #
+  # versioning-strategy matters more than it looks. The default (`increase`)
+  # rewrites the `>=` floors in pyproject.toml on every upstream release,
+  # which produces "update X requirement" PRs. Dependabot reports NO
+  # update-type on those, so the auto-merge workflow cannot tell a patch
+  # from a major and refuses to touch them — and they are noise anyway,
+  # since raising an open-ended lower bound only constrains consumers.
+  # `increase-if-necessary` leaves the floors alone unless a new version
+  # genuinely requires raising them, so routine bumps arrive as uv.lock
+  # updates carrying a real semver update-type.
   - package-ecosystem: pip
     directory: /
+    versioning-strategy: increase-if-necessary
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

@@ -11,8 +11,15 @@ name: Dependabot auto-merge
 #   - major bumps of indirect (transitive) deps — uv.lock pins such as
 #     cryptography or setuptools that nothing under src/ imports directly
 #
-# Still waits for a human:
-#   - major bumps of direct deps (rich, litellm, mypy, actions/checkout, ...)
+# Waits for a human:
+#   - major bumps of direct deps (rich, litellm, structlog, ...)
+#   - anything Dependabot reports no update-type for. Constraint-widening
+#     "update X requirement" PRs come through with update-type,
+#     previous-version and new-version all empty, so severity is simply
+#     unknowable and the only safe answer is no. `.github/dependabot.yml`
+#     sets versioning-strategy: increase-if-necessary specifically to stop
+#     generating those, but the guard stays because security updates can
+#     still raise a floor.
 #
 # How the merge happens
 # ---------------------
@@ -60,10 +67,41 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Decided in one place, as an allow-list. An inline `if:` would have
+      # to express this as a negation, and a `!`-leading expression is a
+      # YAML tag — easy to get subtly wrong for exactly the cases that
+      # matter most.
+      - name: Decide whether this bump may merge itself
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+          DEPENDENCY_TYPE: ${{ steps.metadata.outputs.dependency-type }}
+        run: |
+          case "$UPDATE_TYPE" in
+            version-update:semver-minor | version-update:semver-patch)
+              verdict=true
+              reason="minor/patch bump"
+              ;;
+            version-update:semver-major)
+              if [ "$DEPENDENCY_TYPE" = "indirect" ]; then
+                verdict=true
+                reason="major bump of an indirect dependency"
+              else
+                verdict=false
+                reason="major bump of a direct dependency"
+              fi
+              ;;
+            *)
+              verdict=false
+              reason="Dependabot reported no update-type (got '${UPDATE_TYPE:-empty}')"
+              ;;
+          esac
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "auto-merge=$verdict ($reason)"
+
       - name: Approve and enable auto-merge
-        if: >-
-          steps.metadata.outputs.update-type != 'version-update:semver-major'
-          || steps.metadata.outputs.dependency-type == 'indirect'
+        if: steps.decide.outputs.verdict == 'true'
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,11 +118,10 @@ jobs:
             gh pr merge --auto --squash "$PR_URL"
           fi
 
-      - name: Flag direct major bump for manual review
-        if: >-
-          steps.metadata.outputs.update-type == 'version-update:semver-major'
-          && steps.metadata.outputs.dependency-type != 'indirect'
+      - name: Leave for manual review
+        if: steps.decide.outputs.verdict != 'true'
         env:
           DEPS: ${{ steps.metadata.outputs.dependency-names }}
+          REASON: ${{ steps.decide.outputs.reason }}
         run: |
-          echo "::notice::Not auto-merging: $DEPS is a major bump of a direct dependency and needs a human look."
+          echo "::notice::Not auto-merging $DEPS - $REASON."
