@@ -1,4 +1,10 @@
 version: 2
+
+# Minor and patch bumps — plus major bumps of indirect (transitive) deps —
+# are approved and merged automatically by
+# .github/workflows/dependabot-auto-merge.yml. It uses GitHub's native
+# auto-merge, so all 8 required status checks still gate every merge.
+# Major bumps of direct deps stay open and wait for a human.
 updates:
   # Keep GitHub Actions versions current.
   - package-ecosystem: github-actions
